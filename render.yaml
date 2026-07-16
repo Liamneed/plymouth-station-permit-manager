@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: plymouth-station-permit-manager
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: NODE_ENV
+        value: production
+      - key: AUTOCAB_KEY
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: H_CAPABILITY_IDS
+        value: "14"
+      - key: STATUS_FILE
+        value: /var/data/status.json
+      - key: PERMIT_AUDIT_FILE
+        value: /var/data/permit-audit.jsonl
+      - key: GWR_PERMIT_FILE
+        value: /var/data/gwr-permits.json
+      - key: GWR_PHOTO_DIR
+        value: /var/data/permit-photos
+    disk:
+      name: permit-data
+      mountPath: /var/data
+      sizeGB: 1

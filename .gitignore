@@ -1,0 +1,9 @@
+node_modules/
+.env
+.DS_Store
+npm-debug.log*
+status.json
+permit-audit.jsonl
+gwr-permits.json
+permit-photos/
+*.log

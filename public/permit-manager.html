@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="description" content="Secure permit administration, GWR display permits and audit reporting." />
+  <meta name="theme-color" content="#13213c" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Hackney Permit Manager</title>
+  <link rel="stylesheet" href="/permit-manager.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">Need-A-Cab</p>
+      <h1>Hackney Permit Manager</h1>
+    </div>
+    <div class="top-actions">
+      <span class="environment-pill" id="environmentPill">Secure administration</span>
+      <button class="btn ghost" id="logoutBtn">Sign out</button>
+    </div>
+  </header>
+
+  <nav class="tabs" aria-label="Permit manager sections">
+    <button class="tab active" data-tab="dashboard">Dashboard</button>
+    <button class="tab" data-tab="bulk">Bulk update</button>
+    <button class="tab" data-tab="audit">Audit history</button>
+  </nav>
+
+  <main>
+    <section id="dashboardPanel" class="panel active">
+      <section class="launch-panel" aria-labelledby="quickAccessTitle">
+        <div class="launch-copy">
+          <p class="section-kicker">Quick access</p>
+          <h2 id="quickAccessTitle">Station operations</h2>
+          <p class="subtext">Open the live operational screens in a separate tab. These display screens deliberately contain no links back to administration.</p>
+        </div>
+        <div class="launch-grid">
+          <a class="launch-card rank" href="/" target="_blank" rel="noopener">
+            <span class="launch-icon" aria-hidden="true">R</span>
+            <span><strong>Station rank list</strong><small>Live vehicles, working status and permit validity</small></span>
+            <span class="launch-arrow" aria-hidden="true">↗</span>
+          </a>
+          <a class="launch-card permit" href="/permits" target="_blank" rel="noopener">
+            <span class="launch-icon" aria-hidden="true">P</span>
+            <span><strong>Permit lookup</strong><small>Clean mobile registration search with permit details only</small></span>
+            <span class="launch-arrow" aria-hidden="true">↗</span>
+          </a>
+        </div>
+      </section>
+
+      <div class="hero-row permits-heading">
+        <div>
+          <p class="section-kicker">Live Autocab records</p>
+          <h2>Current permits</h2>
+          <p class="subtext" id="lastUpdated">Loading current Hackney permits…</p>
+        </div>
+        <div class="action-row">
+          <button class="btn primary" id="createPermitBtn">Create new permit</button>
+          <a class="btn secondary" href="/api/permit-current-export">Download current status</a>
+          <button class="btn secondary" id="refreshBtn">Refresh</button>
+        </div>
+      </div>
+
+      <div class="summary-grid" id="summaryGrid">
+        <button class="summary-card all active" data-filter="all"><span>Total</span><strong>—</strong></button>
+        <button class="summary-card valid" data-filter="valid"><span>Valid</span><strong>—</strong></button>
+        <button class="summary-card expiring" data-filter="expiring"><span>Within 30 days</span><strong>—</strong></button>
+        <button class="summary-card expired" data-filter="expired"><span>Expired</span><strong>—</strong></button>
+        <button class="summary-card missing" data-filter="missing"><span>No permit</span><strong>—</strong></button>
+      </div>
+
+      <div class="toolbar">
+        <label class="search-box">
+          <span>Search</span>
+          <input id="permitSearch" type="search" placeholder="Registration, plate or callsign" autocomplete="off" />
+        </label>
+        <label class="select-box">
+          <span>Sort</span>
+          <select id="permitSort">
+            <option value="expiry">Expiry date</option>
+            <option value="callsign">Callsign</option>
+            <option value="registration">Registration</option>
+            <option value="status">Permit status</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="loadingState" class="state-card">Loading permit data from Autocab…</div>
+      <div id="errorState" class="state-card error hidden"></div>
+      <div id="permitGrid" class="permit-grid hidden"></div>
+      <div id="emptyState" class="state-card hidden">No permits match this search or filter.</div>
+    </section>
+
+    <section id="bulkPanel" class="panel">
+      <div class="embedded-header">
+        <div>
+          <p class="section-kicker">Spreadsheet tools</p>
+          <h2>Bulk permit updates</h2>
+          <p class="subtext">Upload, review and safely update multiple permit expiry dates.</p>
+        </div>
+        <a class="btn secondary" href="/api/permit-template">Download template</a>
+      </div>
+      <iframe class="bulk-frame" src="/permit-updater"></iframe>
+    </section>
+
+    <section id="auditPanel" class="panel">
+      <div class="hero-row">
+        <div>
+          <p class="section-kicker">Change control</p>
+          <h2>Permit audit history</h2>
+          <p class="subtext">The latest manual and spreadsheet permit changes.</p>
+        </div>
+        <div class="action-row">
+          <a class="btn secondary" href="/api/permit-audit-export">Download audit report</a>
+          <button class="btn secondary" id="refreshAuditBtn">Refresh</button>
+        </div>
+      </div>
+      <div id="auditList" class="audit-list"><div class="state-card">Open this section to load audit history.</div></div>
+    </section>
+  </main>
+
+  <div class="modal-backdrop hidden" id="permitModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <p class="section-kicker" id="modalKicker">Permit record</p>
+          <h2 id="modalTitle">Update permit</h2>
+        </div>
+        <button class="icon-btn" id="closeModalBtn" aria-label="Close">×</button>
+      </div>
+      <form id="permitForm">
+        <input type="hidden" id="formVehicleId" />
+        <input type="hidden" id="formAction" value="update" />
+
+        <label class="field" id="vehiclePickerField">
+          <span>Select Hackney</span>
+          <input id="vehiclePicker" type="search" placeholder="Search by registration, plate or callsign" autocomplete="off" />
+          <div id="vehicleChoices" class="vehicle-choices hidden"></div>
+        </label>
+
+        <div class="vehicle-summary hidden" id="selectedVehicleSummary">
+          <div><span>Callsign</span><strong id="formCallsign">—</strong></div>
+          <div><span>Registration</span><strong id="formRegistration">—</strong></div>
+          <div><span>Plate number</span><strong id="formPlate">—</strong></div>
+          <div><span>Current expiry</span><strong id="formCurrentExpiry">—</strong></div>
+        </div>
+
+        <label class="field">
+          <span>Permit expiry date</span>
+          <input id="formExpiry" type="date" required />
+        </label>
+
+        <div id="modalWarning" class="inline-message warning hidden"></div>
+        <div id="modalError" class="inline-message error hidden"></div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn ghost" id="cancelModalBtn">Cancel</button>
+          <button type="submit" class="btn primary" id="savePermitBtn">Update permit</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+
+  <div class="modal-backdrop hidden" id="gwrModal" role="dialog" aria-modal="true" aria-labelledby="gwrModalTitle">
+    <div class="modal-card">
+      <div class="modal-head"><div><p class="section-kicker">Plymouth Train Station</p><h2 id="gwrModalTitle">GWR display permit</h2></div><button class="icon-btn" id="closeGwrModalBtn" aria-label="Close">×</button></div>
+      <form id="gwrPermitForm" enctype="multipart/form-data">
+        <input type="hidden" id="gwrVehicleId" />
+        <div class="vehicle-summary"><div><span>Callsign</span><strong id="gwrCallsign">—</strong></div><div><span>Registration</span><strong id="gwrRegistration">—</strong></div><div><span>Plate number</span><strong id="gwrPlate">—</strong></div><div><span>Permit expiry</span><strong id="gwrExpiry">—</strong></div></div>
+        <label class="field"><span>Driver full name</span><input id="gwrDriverName" required autocomplete="name" /></label>
+        <label class="field"><span>Driver badge or licence number</span><input id="gwrDriverNumber" required /></label>
+        <label class="field"><span>Driver photograph</span><input id="gwrPhoto" type="file" accept="image/jpeg,image/png,image/webp" /></label>
+        <p class="photo-help">Use a clear head-and-shoulders photograph. A previously saved photograph is retained when no replacement is selected.</p>
+        <div id="gwrError" class="inline-message error hidden"></div>
+        <div class="modal-actions"><button type="button" class="btn ghost" id="cancelGwrModalBtn">Cancel</button><button type="submit" class="btn primary" id="savePrintGwrBtn">Save and open printable permit</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+  <script src="/permit-manager.js"></script>
+</body>
+</html>

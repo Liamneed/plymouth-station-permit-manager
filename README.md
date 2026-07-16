@@ -1,0 +1,118 @@
+# Plymouth Station Permit Manager
+
+A standalone Node.js application for Plymouth Station Hackney operations.
+
+It combines:
+
+- A public, link-free **Station Rank** screen at `/`
+- A public, link-free **mobile permit lookup** at `/permits`
+- A password-protected **administration dashboard** at `/dashboard`
+- Individual permit creation and renewal
+- Printable Plymouth Train Station GWR display permits with driver photographs
+- Excel/CSV bulk permit updates
+- Current permit, review, completion and audit Excel exports
+- Autocab webhook handling and live rank status
+
+## Application routes
+
+| Route | Purpose | Access |
+|---|---|---|
+| `/` | Station Rank display | Public, no navigation links |
+| `/permits` | Mobile permit lookup | Public, no navigation links |
+| `/dashboard` | Permit management dashboard | Password protected |
+| `/permit-updater` | Bulk spreadsheet tool | Password protected |
+| `/healthz` | Hosting health check | Public |
+
+The dashboard contains clearly separated launch cards for the Rank and Permit Lookup screens. The two operational display screens intentionally do not link back to the dashboard.
+
+## Local setup
+
+1. Install Node.js 20 or newer.
+2. Copy `.env.example` to `.env`.
+3. Add the Autocab subscription key and a strong dashboard password.
+4. Install dependencies:
+
+```bash
+npm install
+```
+
+5. Start the application:
+
+```bash
+npm run dev
+```
+
+6. Open:
+
+```text
+http://localhost:4000/dashboard
+```
+
+## Required environment variables
+
+```env
+AUTOCAB_KEY=your_current_autocab_subscription_key
+ADMIN_PASSWORD=use_a_long_unique_password
+H_CAPABILITY_IDS=14
+```
+
+`H_CAPABILITY_IDS` controls which Autocab capability identifies vehicles shown on the rank and permit screens. Multiple IDs can be comma separated.
+
+## Data that must persist in production
+
+The following files and directory hold operational data:
+
+- `status.json`
+- `permit-audit.jsonl`
+- `gwr-permits.json`
+- `permit-photos/`
+
+When hosting on Render, use the included `render.yaml`. It mounts a persistent disk at `/var/data` and points these records there.
+
+## Push as a new GitHub repository
+
+From Terminal, change into the unzipped project folder and run:
+
+```bash
+git init
+git add .
+git commit -m "Initial Plymouth Station permit manager"
+git branch -M main
+git remote add origin https://github.com/YOUR-GITHUB-USERNAME/plymouth-station-permit-manager.git
+git push -u origin main
+```
+
+Create the empty repository on GitHub before running the final two commands. Do not initialise it with another README because this project already contains one.
+
+Never commit `.env`. It is excluded by `.gitignore`.
+
+## Render deployment
+
+1. Push the project to GitHub.
+2. In Render, create a new Blueprint and select the repository.
+3. Render reads `render.yaml` automatically.
+4. Enter the secret values for:
+   - `AUTOCAB_KEY`
+   - `ADMIN_PASSWORD`
+5. Deploy.
+
+The included persistent disk requires a paid Render instance. Without persistent storage, photographs, audit records and saved GWR permit details can be lost during a redeploy or restart.
+
+## Security notes
+
+- The Autocab key remains server-side.
+- Administration uses an HttpOnly session cookie and CSRF protection.
+- Production cookies use the `Secure` flag.
+- Security headers are set by the server.
+- The public permit lookup is read-only.
+- Rotate any Autocab key that has previously been exposed in screenshots, chat messages or a committed file.
+
+## Permit date mapping
+
+The user-facing field is called **Permit expiry date**. Autocab stores it in:
+
+```text
+motExpiryDate
+```
+
+Updates fetch the latest complete vehicle object, change only `motExpiryDate`, submit the full object, then fetch it again to verify the saved value.

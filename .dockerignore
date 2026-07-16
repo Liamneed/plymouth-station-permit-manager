@@ -1,0 +1,8 @@
+node_modules
+npm-debug.log
+.env
+.git
+permit-photos
+*.jsonl
+status.json
+gwr-permits.json
