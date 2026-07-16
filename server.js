@@ -1157,19 +1157,25 @@ app.get("/api/permit-audit", requireAdmin, (_req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ---------- Health & root ----------
-app.use(express.static(path.join(__dirname, "public")));
-app.get("/healthz", (_req, res) => res.json({ ok: true }));
-app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+// ---------- Main pages and static files ----------
 
-process.on("SIGTERM", () => {
-  try { saveStatusToDisk(); } finally { process.exit(0); }
-});
-process.on("SIGINT", () => {
-  try { saveStatusToDisk(); } finally { process.exit(0); }
+// Main domain opens the secure dashboard.
+// Users who are not signed in will be redirected to /permit-login.
+app.get("/", requireAdmin, (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "permit-manager.html"));
 });
 
-app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
-  console.log(`PING timeout: ${PING_TIMEOUT_MINUTES} minute(s).`);
+// Public station rank screen.
+app.get("/rank", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
+
+// Health check for Coolify.
+app.get("/healthz", (_req, res) => {
+  res.json({ ok: true });
+});
+
+// Static assets must come after the explicit page routes.
+app.use(express.static(path.join(__dirname, "public"), {
+  index: false,
+}));
