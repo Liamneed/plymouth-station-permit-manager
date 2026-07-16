@@ -3,6 +3,7 @@ FROM node:20-bookworm-slim
 WORKDIR /app
 
 ENV NODE_ENV=production
+ENV NODE_OPTIONS=--dns-result-order=ipv4first
 ENV NPM_CONFIG_AUDIT=false
 ENV NPM_CONFIG_FUND=false
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
@@ -14,7 +15,8 @@ ENV NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
 COPY package.json package-lock.json ./
 
 RUN npm config set registry https://registry.npmjs.org/ \
-    && npm install --omit=dev --no-audit --no-fund --prefer-online
+    && npm install --omit=dev --no-audit --no-fund \
+       --prefer-online --foreground-scripts --loglevel=verbose
 
 COPY . .
 
