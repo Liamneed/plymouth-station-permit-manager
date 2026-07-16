@@ -1159,23 +1159,50 @@ app.get("/api/permit-audit", requireAdmin, (_req, res) => {
 
 // ---------- Main pages and static files ----------
 
-// Main domain opens the secure dashboard.
-// Users who are not signed in will be redirected to /permit-login.
+// The secure permit dashboard is the main homepage.
+// Anyone not signed in is redirected to /permit-login.
 app.get("/", requireAdmin, (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "permit-manager.html"));
 });
 
-// Public station rank screen.
+// Existing secure dashboard routes.
+app.get("/dashboard", requireAdmin, (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "permit-manager.html"));
+});
+
+// Public Hackney rank display.
 app.get("/rank", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-// Health check for Coolify.
+// Coolify health check.
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true });
 });
 
-// Static assets must come after the explicit page routes.
+// Serve CSS, JavaScript, images and other public assets.
+// `index: false` prevents public/index.html overriding the homepage route.
 app.use(express.static(path.join(__dirname, "public"), {
   index: false,
 }));
+
+process.on("SIGTERM", () => {
+  try {
+    saveStatusToDisk();
+  } finally {
+    process.exit(0);
+  }
+});
+
+process.on("SIGINT", () => {
+  try {
+    saveStatusToDisk();
+  } finally {
+    process.exit(0);
+  }
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server listening on http://0.0.0.0:${PORT}`);
+  console.log(`PING timeout: ${PING_TIMEOUT_MINUTES} minute(s).`);
+});
