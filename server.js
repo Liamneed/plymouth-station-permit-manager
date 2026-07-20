@@ -20,7 +20,52 @@ const PORT = process.env.PORT || 4000;
 
 const AUTOCAB_KEY    = process.env.AUTOCAB_KEY || "";
 const WEBHOOK_TOKEN  = process.env.WEBHOOK_TOKEN || "";
-const STATUS_FILE    = process.env.STATUS_FILE || "./status.json";
+const DATA_DIR = path.resolve(process.env.DATA_DIR || "./data");
+const STATUS_FILE = path.resolve(process.env.STATUS_FILE || path.join(DATA_DIR, "status.json"));
+
+// Citywide Plymouth plate register. The live copy is stored in DATA_DIR so it
+// survives Coolify redeployments. A seed file is bundled for first startup.
+const PLYMOUTH_REGISTER_FILE = path.join(DATA_DIR, "plymouth-permits.json");
+const PLYMOUTH_REGISTER_BACKUP_FILE = path.join(DATA_DIR, "plymouth-permits-backup.json");
+const PLYMOUTH_REGISTER_SEED_FILE = path.join(__dirname, "plymouth-permits-seed.json");
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const normalizeRegistration = (value) => String(value ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+const normalizePlate = (value) => String(value ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+function readPlymouthRegister() {
+  try {
+    if (!fs.existsSync(PLYMOUTH_REGISTER_FILE) && fs.existsSync(PLYMOUTH_REGISTER_SEED_FILE)) {
+      fs.copyFileSync(PLYMOUTH_REGISTER_SEED_FILE, PLYMOUTH_REGISTER_FILE);
+    }
+    if (!fs.existsSync(PLYMOUTH_REGISTER_FILE)) return { updatedAt: null, sourceFile: null, records: [] };
+    const parsed = JSON.parse(fs.readFileSync(PLYMOUTH_REGISTER_FILE, "utf8"));
+    const rows = Array.isArray(parsed) ? parsed : parsed.records;
+    return {
+      updatedAt: parsed.updatedAt || null,
+      sourceFile: parsed.sourceFile || null,
+      records: (Array.isArray(rows) ? rows : []).map(row => ({
+        registration: normalizeRegistration(row.registration),
+        plateNumber: String(row.plateNumber ?? "").trim(),
+      })).filter(row => row.registration && row.plateNumber),
+    };
+  } catch (error) {
+    console.warn("Unable to read Plymouth permit register:", error.message);
+    return { updatedAt: null, sourceFile: null, records: [] };
+  }
+}
+
+function writePlymouthRegister(payload) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (fs.existsSync(PLYMOUTH_REGISTER_FILE)) {
+    try { fs.copyFileSync(PLYMOUTH_REGISTER_FILE, PLYMOUTH_REGISTER_BACKUP_FILE); } catch {}
+  }
+  fs.writeFileSync(PLYMOUTH_REGISTER_FILE, JSON.stringify(payload, null, 2), "utf8");
+}
+
+function plymouthRegisterMap() {
+  return new Map(readPlymouthRegister().records.map(row => [normalizeRegistration(row.registration), row]));
+}
 
 // HOW LONG a ping keeps a vehicle ONLINE (minutes) before timing out
 const PING_TIMEOUT_MINUTES = Number(process.env.PING_TIMEOUT_MINUTES || 10);
@@ -775,6 +820,7 @@ app.get("/api/vehicles", async (_req, res) => {
       null;
 
     if (Array.isArray(list)) {
+      const cityRegister = plymouthRegisterMap();
       const normalized = await mapWithConcurrency(
         list,
         PERMIT_DETAIL_CONCURRENCY,
@@ -783,6 +829,14 @@ app.get("/api/vehicles", async (_req, res) => {
           isSuspended: v?.isSuspended === true,
           // UI name is "Permit expiry date"; Autocab source field is motExpiryDate.
           permitExpiryDate: await fetchVehiclePermitExpiry(v),
+          ...(() => {
+            const city = cityRegister.get(normalizeRegistration(v?.registration));
+            return {
+              plymouthListed: Boolean(city),
+              plymouthPlateNumber: city?.plateNumber || null,
+              plymouthPlateMatch: Boolean(city) && normalizePlate(city.plateNumber) === normalizePlate(v?.plateNumber),
+            };
+          })(),
         })
       );
 
@@ -807,9 +861,9 @@ app.get("/api/vehicles", async (_req, res) => {
 // ---------- Secure permit administration ----------
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "";
 const ADMIN_SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_MS || 8 * 60 * 60 * 1000);
-const AUDIT_FILE = path.resolve(process.env.PERMIT_AUDIT_FILE || "./permit-audit.jsonl");
-const GWR_PERMIT_FILE = path.resolve(process.env.GWR_PERMIT_FILE || "./gwr-permits.json");
-const GWR_PHOTO_DIR = path.resolve(process.env.GWR_PHOTO_DIR || "./permit-photos");
+const AUDIT_FILE = path.resolve(process.env.PERMIT_AUDIT_FILE || path.join(DATA_DIR, "permit-audit.jsonl"));
+const GWR_PERMIT_FILE = path.resolve(process.env.GWR_PERMIT_FILE || path.join(DATA_DIR, "gwr-permits.json"));
+const GWR_PHOTO_DIR = path.resolve(process.env.GWR_PHOTO_DIR || path.join(DATA_DIR, "permit-photos"));
 fs.mkdirSync(GWR_PHOTO_DIR,{recursive:true});
 function readGwrPermits(){try{return fs.existsSync(GWR_PERMIT_FILE)?JSON.parse(fs.readFileSync(GWR_PERMIT_FILE,"utf8")):{};}catch{return {};}}
 function writeGwrPermits(data){fs.writeFileSync(GWR_PERMIT_FILE,JSON.stringify(data,null,2),"utf8");}
@@ -943,6 +997,38 @@ function hasHCapability(v){
   });
 }
 function isHackney(v){return v?.isActive!==false&&hasHCapability(v);}
+function isNeedACabRankVehicle(v){
+  if(!isHackney(v)) return false;
+  const callsign=Number(v?.callsign??v?.callSign??v?.code??v?.mdtId);
+  return Number.isFinite(callsign)&&callsign>=900&&callsign<=999;
+}
+
+// Dedicated station-rank feed: active Need-A-Cab Hackneys only (H capability,
+// callsigns 900-999). This avoids showing private-hire or unrelated vehicles.
+app.get("/api/rank-vehicles", async (_req,res)=>{
+  try{
+    const all=extractVehicleList(await autocabRequest("https://autocab-api.azure-api.net/vehicle/v1/vehicles"));
+    const list=all.filter(isNeedACabRankVehicle);
+    const cityRegister=plymouthRegisterMap();
+    const vehicles=await mapWithConcurrency(list,PERMIT_DETAIL_CONCURRENCY,async v=>{
+      const city=cityRegister.get(normalizeRegistration(v?.registration));
+      return {
+        ...v,
+        isSuspended:v?.isSuspended===true,
+        permitExpiryDate:await fetchVehiclePermitExpiry(v),
+        plymouthRegisterLoaded:cityRegister.size>0,
+        plymouthListed:Boolean(city),
+        plymouthPlateNumber:city?.plateNumber||null,
+        plymouthPlateMatch:Boolean(city)&&normalizePlate(city.plateNumber)===normalizePlate(v?.plateNumber),
+      };
+    });
+    vehicles.sort((a,b)=>Number(a.callsign??a.callSign??0)-Number(b.callsign??b.callSign??0));
+    res.json({vehicles,count:vehicles.length,registerCount:cityRegister.size,generatedAt:new Date().toISOString()});
+  }catch(error){
+    console.error("/api/rank-vehicles error:",error);
+    res.status(error.status||500).json({error:error.message});
+  }
+});
 function appendAudit(entry){fs.mkdirSync(path.dirname(AUDIT_FILE),{recursive:true});fs.appendFileSync(AUDIT_FILE,JSON.stringify(entry)+"\n","utf8");}
 function buildWorkbook(rows, sheetName, columns){const wb=XLSX.utils.book_new();const data=[columns.map(c=>c.label),...rows.map(r=>columns.map(c=>typeof c.value==="function"?c.value(r):r[c.value]))];const ws=XLSX.utils.aoa_to_sheet(data);ws["!cols"]=columns.map(c=>({wch:c.width||18}));ws["!autofilter"]={ref:`A1:${XLSX.utils.encode_col(columns.length-1)}${Math.max(1,data.length)}`};XLSX.utils.book_append_sheet(wb,ws,sheetName);return XLSX.write(wb,{type:"buffer",bookType:"xlsx"});}
 function sendXlsx(res, buffer, filename){res.setHeader("Content-Disposition",`attachment; filename="${filename}"`);res.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").send(buffer);}
@@ -1020,6 +1106,117 @@ app.post("/api/permit-update-stream", requireAdmin, requireCsrf, async(req,res)=
 });
 
 
+// ---------- Plymouth citywide permit register ----------
+const plymouthRegisterUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const name = String(file.originalname || "").toLowerCase();
+    cb(null, [".xlsx", ".xls", ".csv"].some(ext => name.endsWith(ext)));
+  },
+});
+
+function analysePlymouthRows(records) {
+  const registrationCounts = new Map();
+  const plateCounts = new Map();
+  for (const row of records) {
+    registrationCounts.set(row.registration, (registrationCounts.get(row.registration) || 0) + 1);
+    const plate = normalizePlate(row.plateNumber);
+    plateCounts.set(plate, (plateCounts.get(plate) || 0) + 1);
+  }
+  return {
+    total: records.length,
+    duplicateRegistrations: [...registrationCounts].filter(([, count]) => count > 1).map(([value]) => value),
+    duplicatePlates: [...plateCounts].filter(([, count]) => count > 1).map(([value]) => value),
+  };
+}
+
+async function getPlymouthRegisterWithComparison() {
+  const register = readPlymouthRegister();
+  let needACab = [];
+  try { needACab = (await loadHackneyPermitDashboard()).permits || []; } catch {}
+  const needMap = new Map(needACab.map(row => [normalizeRegistration(row.registration), row]));
+  const records = register.records.map(row => {
+    const managed = needMap.get(normalizeRegistration(row.registration));
+    return {
+      ...row,
+      needACab: Boolean(managed),
+      callsign: managed?.callsign || null,
+      needACabPlateNumber: managed?.plateNumber || null,
+      needACabPermitExpiryDate: managed?.permitExpiryDate || null,
+      needACabPermitExpiryDisplay: managed?.permitExpiryDisplay || null,
+      needACabPermitStatus: managed?.status || null,
+      needACabPermitStatusLabel: managed?.statusLabel || null,
+      plateMatch: managed ? normalizePlate(managed.plateNumber) === normalizePlate(row.plateNumber) : null,
+    };
+  });
+  const needRegistrations = new Set(records.filter(row => row.needACab).map(row => normalizeRegistration(row.registration)));
+  const missingNeedACab = needACab.filter(row => !needRegistrations.has(normalizeRegistration(row.registration))).map(row => ({
+    callsign: row.callsign,
+    registration: row.registration,
+    needACabPlateNumber: row.plateNumber,
+    issue: "Not listed in Plymouth register",
+  }));
+  const mismatches = records.filter(row => row.needACab && row.plateMatch === false);
+  return {
+    ...register,
+    records,
+    summary: {
+      ...analysePlymouthRows(register.records),
+      needACabVehicles: needACab.length,
+      matchedNeedACab: records.filter(row => row.needACab && row.plateMatch).length,
+      plateMismatches: mismatches.length,
+      missingNeedACab: missingNeedACab.length,
+    },
+    exceptions: [
+      ...mismatches.map(row => ({ callsign: row.callsign, registration: row.registration, needACabPlateNumber: row.needACabPlateNumber, plymouthPlateNumber: row.plateNumber, issue: "Plate mismatch" })),
+      ...missingNeedACab,
+    ],
+  };
+}
+
+app.get("/api/plymouth-register", requireAdmin, async (_req, res) => {
+  try { res.json(await getPlymouthRegisterWithComparison()); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post("/api/plymouth-register-upload", requireAdmin, requireCsrf, plymouthRegisterUpload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "Choose an Excel or CSV permit register." });
+    const workbook = XLSX.read(req.file.buffer, { type: "buffer", cellDates: true });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: true });
+    if (!rows.length) return res.status(400).json({ error: "The spreadsheet contains no permit rows." });
+    const headers = Object.keys(rows[0]);
+    const registrationColumn = pickColumn(headers, ["Vehicle Registration", "Registration", "Registration Number", "VRM", "Reg"]);
+    const plateColumn = pickColumn(headers, ["Plate Number", "Taxi Plate", "Licence Plate", "License Plate"]);
+    if (!registrationColumn || !plateColumn) return res.status(400).json({ error: "Required columns: Vehicle Registration and Plate Number.", detectedColumns: headers });
+    const records = rows.map(row => ({
+      registration: normalizeRegistration(row[registrationColumn]),
+      plateNumber: String(row[plateColumn] ?? "").trim(),
+    })).filter(row => row.registration && row.plateNumber);
+    const analysis = analysePlymouthRows(records);
+    if (!records.length) return res.status(400).json({ error: "No valid registration and plate rows were found." });
+    if (analysis.duplicateRegistrations.length || analysis.duplicatePlates.length) {
+      return res.status(409).json({ error: "Duplicate registrations or plate numbers must be corrected before replacing the register.", ...analysis });
+    }
+    writePlymouthRegister({ updatedAt: new Date().toISOString(), sourceFile: req.file.originalname, records });
+    res.json({ ok: true, message: `${records.length} Plymouth permit records loaded.`, ...(await getPlymouthRegisterWithComparison()) });
+  } catch (error) {
+    console.error("Plymouth register upload failed:", error);
+    res.status(500).json({ error: error.message || "Upload failed." });
+  }
+});
+
+app.get("/api/plymouth-register-export", requireAdmin, (_req, res) => {
+  const register = readPlymouthRegister();
+  const buffer = buildWorkbook(register.records, "Plymouth Permit Register", [
+    { label: "Vehicle Registration", value: "registration", width: 24 },
+    { label: "Plate Number", value: "plateNumber", width: 18 },
+  ]);
+  sendXlsx(res, buffer, `plymouth-permit-register-${new Date().toISOString().slice(0,10)}.xlsx`);
+});
+
 // ---------- All-in-one permit manager dashboard ----------
 function permitStatus(expiryValue) {
   const parsed = parsePermitDate(expiryValue);
@@ -1089,15 +1286,19 @@ app.get("/api/permit-dashboard", requireAdmin, async (_req, res) => {
 
 app.get("/api/permit-public-search", async (req, res) => {
   try {
-    const query = normalizeVehicleText(req.query.q || "");
-    const dashboard = await loadHackneyPermitDashboard();
-    const rows = dashboard.permits
-      .filter(item => !query || normalizeVehicleText(item.registration).includes(query))
-      .slice(0, query ? 25 : 100)
-      .map(({ vehicleId, callsign, registration, plateNumber, permitExpiryDate, permitExpiryDisplay, status, statusLabel, daysUntilExpiry }) => ({
-        vehicleId, callsign, registration, plateNumber, permitExpiryDate, permitExpiryDisplay, status, statusLabel, daysUntilExpiry
-      }));
-    res.json({ permits: rows, count: rows.length, generatedAt: dashboard.generatedAt });
+    const query = normalizeRegistration(req.query.q || "");
+    const data = await getPlymouthRegisterWithComparison();
+    const rows = data.records
+      .filter(item => !query || normalizeRegistration(item.registration).includes(query) || normalizePlate(item.plateNumber).includes(query))
+      .slice(0, query ? 50 : 500);
+    res.json({
+      permits: rows,
+      count: rows.length,
+      total: data.records.length,
+      generatedAt: new Date().toISOString(),
+      registerUpdatedAt: data.updatedAt,
+      sourceFile: data.sourceFile,
+    });
   } catch (error) { res.status(error.status || 500).json({ error: error.message }); }
 });
 

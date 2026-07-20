@@ -116,3 +116,25 @@ motExpiryDate
 ```
 
 Updates fetch the latest complete vehicle object, change only `motExpiryDate`, submit the full object, then fetch it again to verify the saved value.
+
+## Plymouth citywide permit register
+
+The secure dashboard now includes a **Plymouth register** tab. Upload an Excel or CSV file with these columns:
+
+- `Vehicle Registration`
+- `Plate Number`
+
+The live register is stored at `${DATA_DIR}/plymouth-permits.json`; the previous copy is retained as `plymouth-permits-backup.json`. The bundled `Plymouth Plate Report.xlsx` and `plymouth-permits-seed.json` provide the initial 42 records.
+
+Public routes:
+
+- `/rank` — compact Need-A-Cab station rank with live status, Need-A-Cab permit state and Plymouth register match.
+- `/permits` — citywide Plymouth register lookup, with Need-A-Cab vehicles clearly identified.
+
+For Coolify, mount persistent storage at `/app/data` and set `DATA_DIR=/app/data`.
+
+## Rank and citywide checker update
+
+- `/rank` now uses `/api/rank-vehicles` and only shows active Need-A-Cab Hackneys with the H capability and callsigns 900-999.
+- The rank screen keeps the live Need-A-Cab permit state and shows the Plymouth register result separately on one compact line.
+- `/permits` is a citywide Plymouth register table with mobile filters for all records, Need-A-Cab vehicles, other operators and exceptions.

@@ -23,6 +23,7 @@
   <nav class="tabs" aria-label="Permit manager sections">
     <button class="tab active" data-tab="dashboard">Dashboard</button>
     <button class="tab" data-tab="bulk">Bulk update</button>
+    <button class="tab" data-tab="register">Plymouth register</button>
     <button class="tab" data-tab="audit">Audit history</button>
   </nav>
 
@@ -101,6 +102,31 @@
         <a class="btn secondary" href="/api/permit-template">Download template</a>
       </div>
       <iframe class="bulk-frame" src="/permit-updater"></iframe>
+    </section>
+
+
+    <section id="registerPanel" class="panel">
+      <div class="hero-row">
+        <div>
+          <p class="section-kicker">Citywide visual checker</p>
+          <h2>Plymouth permit register</h2>
+          <p class="subtext" id="registerUpdated">Load and compare all Plymouth plate records with the Need-A-Cab Hackney fleet.</p>
+        </div>
+        <div class="action-row">
+          <a class="btn secondary" href="/api/plymouth-register-export">Download register</a>
+          <button class="btn secondary" id="refreshRegisterBtn">Refresh</button>
+        </div>
+      </div>
+      <div class="register-upload-card">
+        <div><strong>Replace citywide register</strong><p>Upload Excel or CSV with <b>Vehicle Registration</b> and <b>Plate Number</b>. The current register is backed up automatically.</p></div>
+        <form id="registerUploadForm"><input id="registerFile" type="file" accept=".xlsx,.xls,.csv" required><button class="btn primary" id="uploadRegisterBtn" type="submit">Upload register</button></form>
+      </div>
+      <div id="registerMessage" class="inline-message hidden"></div>
+      <div class="register-summary" id="registerSummary">
+        <div><span>Plymouth records</span><strong>—</strong></div><div><span>Need-A-Cab fleet</span><strong>—</strong></div><div><span>Matched</span><strong>—</strong></div><div><span>Plate mismatches</span><strong>—</strong></div><div><span>Missing Need-A-Cab</span><strong>—</strong></div>
+      </div>
+      <div class="toolbar register-toolbar"><label class="search-box"><span>Search register</span><input id="registerSearch" type="search" placeholder="Registration, plate or callsign"></label><label class="select-box"><span>Show</span><select id="registerFilter"><option value="all">All records</option><option value="needacab">Need-A-Cab only</option><option value="external">Other operators</option><option value="issues">Exceptions only</option></select></label></div>
+      <div id="registerTable" class="register-table"><div class="state-card">Open this section to load the Plymouth register.</div></div>
     </section>
 
     <section id="auditPanel" class="panel">

@@ -41,6 +41,10 @@ function bindEvents() {
   $('permitForm').addEventListener('submit', savePermit);
   $('vehiclePicker').addEventListener('input', renderVehicleChoices);
   $('refreshAuditBtn').addEventListener('click', loadAudit);
+  $('refreshRegisterBtn').addEventListener('click', loadRegister);
+  $('registerUploadForm').addEventListener('submit', uploadRegister);
+  $('registerSearch').addEventListener('input', renderRegister);
+  $('registerFilter').addEventListener('change', renderRegister);
   $('logoutBtn').addEventListener('click', async () => { await api('/api/permit-logout', { method: 'POST', body: '{}' }); location.href = '/permit-login'; });
   $('closeGwrModalBtn').addEventListener('click', closeGwrModal);
   $('cancelGwrModalBtn').addEventListener('click', closeGwrModal);
@@ -58,6 +62,7 @@ function switchTab(name) {
   document.querySelectorAll('.panel').forEach(panel => panel.classList.remove('active'));
   $(`${name}Panel`).classList.add('active');
   if (name === 'audit') loadAudit();
+  if (name === 'register') loadRegister();
 }
 
 async function loadDashboard() {
@@ -247,5 +252,24 @@ async function saveGwrPermit(event){
   const button=$('savePrintGwrBtn');button.disabled=true;button.textContent='Saving…';$('gwrError').classList.add('hidden');
   try{const response=await fetch(`/api/gwr-permit/${encodeURIComponent(id)}`,{method:'POST',headers:{'x-csrf-token':csrf},body:form});const data=await response.json();if(!response.ok)throw new Error(data.error||'Unable to save permit');const item=permits.find(x=>String(x.vehicleId)===String(id));if(item)item.gwrPermit=data.record;closeGwrModal();renderPermits();window.open(data.printUrl,'_blank','noopener');showToast('GWR display permit saved.');}catch(error){$('gwrError').textContent=error.message;$('gwrError').classList.remove('hidden');}finally{button.disabled=false;button.textContent='Save and open printable permit';}
 }
+
+
+let plymouthRegister = [];
+function registerRowHtml(item){
+  const operator=item.needACab?'<span class="operator-badge nac">Need-A-Cab</span>':'<span class="operator-badge external">Other operator</span>';
+  const compare=!item.needACab?'<span class="comparison-badge na">Register only</span>':item.plateMatch?'<span class="comparison-badge ok">Plate matches</span>':'<span class="comparison-badge issue">Plate mismatch</span>';
+  const detail=item.needACab?`Callsign ${escapeHtml(item.callsign||'—')} · Autocab ${escapeHtml(item.needACabPlateNumber||'—')}`:'Not managed in Need-A-Cab Autocab';
+  return `<div class="register-row"><span class="reg-strong">${escapeHtml(item.registration)}</span><span>${escapeHtml(item.plateNumber)}</span>${operator}${compare}<span>${detail}</span></div>`;
+}
+function renderRegister(){
+  const q=($('registerSearch')?.value||'').toUpperCase().replace(/[^A-Z0-9]/g,'');const filter=$('registerFilter')?.value||'all';
+  const rows=plymouthRegister.filter(item=>{const search=!q||`${item.registration}${item.plateNumber}${item.callsign||''}${item.needACabPlateNumber||''}`.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(q);const show=filter==='all'||(filter==='needacab'&&item.needACab)||(filter==='external'&&!item.needACab)||(filter==='issues'&&item.needACab&&item.plateMatch===false);return search&&show;});
+  $('registerTable').innerHTML=`<div class="register-row header"><span>Registration</span><span>Plymouth plate</span><span>Operator</span><span>Comparison</span><span>Need-A-Cab detail</span></div>${rows.map(registerRowHtml).join('')||'<div class="state-card">No register records match this view.</div>'}`;
+}
+async function loadRegister(){
+  $('registerTable').innerHTML='<div class="state-card">Loading Plymouth register…</div>';
+  try{const data=await api('/api/plymouth-register');plymouthRegister=data.records||[];const s=data.summary||{};const values=[s.total,s.needACabVehicles,s.matchedNeedACab,s.plateMismatches,s.missingNeedACab];document.querySelectorAll('#registerSummary strong').forEach((el,i)=>el.textContent=values[i]??0);$('registerUpdated').textContent=`${s.total||0} records · Updated ${data.updatedAt?new Date(data.updatedAt).toLocaleString('en-GB'):'not yet'} · ${data.sourceFile||'No source file'}`;renderRegister();}catch(error){$('registerTable').innerHTML=`<div class="state-card error">${escapeHtml(error.message)}</div>`;}
+}
+async function uploadRegister(event){event.preventDefault();const file=$('registerFile').files[0];if(!file)return;const form=new FormData();form.append('file',file);const button=$('uploadRegisterBtn');button.disabled=true;button.textContent='Uploading…';$('registerMessage').classList.add('hidden');try{const data=await api('/api/plymouth-register-upload',{method:'POST',body:form});$('registerMessage').textContent=data.message;$('registerMessage').className='inline-message success';$('registerFile').value='';await loadRegister();}catch(error){$('registerMessage').textContent=error.message;$('registerMessage').className='inline-message error';}finally{button.disabled=false;button.textContent='Upload register';}}
 
 initialise();
