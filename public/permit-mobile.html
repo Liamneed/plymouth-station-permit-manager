@@ -1,19 +1,15 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#13213c"><title>Plymouth Permit Lookup</title><link rel="stylesheet" href="/permit-mobile.css"></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#101827"><title>Plymouth Permit Lookup</title><link rel="stylesheet" href="/permit-mobile.css"></head>
 <body>
-<header>
-  <div class="head"><div class="brand">P</div><div><h1>Plymouth Permit Lookup</h1><p>Citywide register with Need-A-Cab identification</p></div><button id="refreshBtn" type="button">Refresh</button></div>
-  <input id="searchInput" type="search" placeholder="Search registration or plate number…" autocomplete="off">
-  <div class="filters" role="group" aria-label="Permit filters"><button class="active" data-filter="all">All</button><button data-filter="nac">Need-A-Cab</button><button data-filter="other">Other</button><button data-filter="issues">Issues</button></div>
-  <div id="summary" class="summary"></div>
-  <div id="statusLine">Loading permit register…</div>
+<header class="topbar">
+  <div class="title-wrap"><div class="brand">P</div><div><h1>Plymouth Permit Lookup</h1><p>Citywide register with Need-A-Cab identification</p></div></div>
+  <button id="refreshBtn" type="button">Refresh</button>
 </header>
-<main>
-  <section class="permit-table" aria-label="Plymouth permit records">
-    <div class="table-head"><span>Registration</span><span>Plate</span><span>Operator</span><span>Details</span></div>
-    <div id="results"><div class="empty">Loading…</div></div>
-  </section>
-  <p class="notice">This checker confirms whether a vehicle appears in the uploaded Plymouth permit register. Need-A-Cab information is shown separately from the citywide register.</p>
-</main>
+<section class="controls"><input id="searchInput" type="search" placeholder="Search registration, Plymouth plate or callsign…" autocomplete="off"></section>
+<section class="filters" role="group" aria-label="Permit filters"><button class="active" data-filter="all">All</button><button data-filter="nac">Need-A-Cab</button><button data-filter="other">Other</button><button data-filter="issues">Issues</button></section>
+<section id="summary" class="counts" aria-label="Permit totals"></section>
+<div id="statusLine" class="status-line">Loading permit register…</div>
+<div class="column-head"><span>Registration</span><span>Plate</span><span>Operator</span><span>Callsign</span><span>Permit</span></div>
+<main><div id="results"><div class="message">Loading…</div></div><p class="notice">This checker confirms whether a vehicle appears in the uploaded Plymouth permit register. Need-A-Cab permit information is shown separately.</p></main>
 <script src="/permit-mobile.js"></script>
 </body></html>

@@ -17,7 +17,7 @@
   <select id="statusFilter" aria-label="Filter vehicles"><option value="all">All vehicles</option><option value="working">Working</option><option value="offline">Offline</option><option value="suspended">Suspended</option><option value="issues">Permit issues</option></select>
 </section>
 <section id="statusCounts" class="counts" aria-label="Rank totals"></section>
-<div class="column-head"><span>Callsign</span><span>Status</span><span>Registration</span><span>N-A-C permit</span><span>Plymouth</span></div>
+<div class="column-head"><span>Callsign</span><span>Status</span><span>Registration</span><span>Plate</span><span>Permit</span><span>Plymouth</span></div>
 <main><div id="rows"><div class="message">Loading Need-A-Cab Hackneys…</div></div></main>
 <script>
 const $=id=>document.getElementById(id),esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -26,7 +26,7 @@ let vehicles=[],statuses=new Map();
 const getList=d=>Array.isArray(d)?d:(d?.items||d?.results||d?.vehicles||d?.data||[]);
 const cs=v=>String(v.callsign??v.callSign??v.code??'');
 const reg=v=>String(v.registration??v.vrm??'');
-const plate=v=>String(v.plateNumber??v.plate??'');
+const plate=v=>String(v.autocabPlateNumber??v.name??v.plateNumber??v.plate??'');
 const suspended=v=>v.isSuspended===true;
 function statusFor(v){
   if(suspended(v))return {key:'suspended',label:'SUSPENDED'};
@@ -37,27 +37,27 @@ function statusFor(v){
 }
 function nacPermit(v){
   const expiry=v.permitExpiryDate||v.motExpiryDate;
-  if(!expiry)return {key:'issue',short:'NO DATE',title:'No Need-A-Cab permit expiry date is recorded'};
-  const d=new Date(expiry);const day=new Date(d.getFullYear(),d.getMonth(),d.getDate());const today=new Date();today.setHours(0,0,0,0);const days=Math.ceil((day-today)/86400000);
+  if(!expiry)return {key:'issue',short:'NO DATE',title:'No Need-A-Cab permit expiry date recorded'};
+  const d=new Date(expiry),today=new Date();today.setHours(0,0,0,0);const days=Math.ceil((d-today)/86400000);
   if(days<0)return {key:'issue',short:'EXPIRED',title:'Need-A-Cab permit has expired'};
-  if(days<=30)return {key:'due',short:`DUE ${days}d`,title:`Need-A-Cab permit expires in ${days} day${days===1?'':'s'}`};
-  return {key:'valid',short:'VALID',title:`Need-A-Cab permit valid until ${d.toLocaleDateString('en-GB')}`};
+  if(days<=30)return {key:'due',short:`DUE ${Math.max(0,days)}D`,title:`Need-A-Cab permit expires in ${Math.max(0,days)} day${days===1?'':'s'}`};
+  return {key:'valid',short:'VALID',title:'Need-A-Cab permit is current'};
 }
 function cityPermit(v){
-  if(v.plymouthRegisterLoaded===false)return {key:'neutral',short:'NOT LOADED',title:'Plymouth register has not been loaded'};
-  if(v.plymouthListed!==true)return {key:'issue',short:'NOT LISTED',title:'Registration not found in the uploaded Plymouth register'};
-  if(v.plymouthPlateMatch!==true)return {key:'issue',short:`P${esc(v.plymouthPlateNumber||'?')} MISMATCH`,title:`Plymouth plate ${v.plymouthPlateNumber||'unknown'} does not match Autocab plate ${plate(v)||'blank'}`};
-  return {key:'valid',short:`P${esc(v.plymouthPlateNumber)}`,title:'Registration and plate match the uploaded Plymouth register'};
+  if(v.plymouthRegisterLoaded===false)return {key:'neutral',short:'NOT LOADED',title:'Plymouth register is not loaded'};
+  if(!v.plymouthListed)return {key:'issue',short:'NOT LISTED',title:'Registration is not in the Plymouth register'};
+  if(v.plymouthPlateMatch===false)return {key:'issue',short:`P${esc(v.plymouthPlateNumber||'?')} !`,title:`Plymouth plate ${v.plymouthPlateNumber||'unknown'} does not match Autocab plate ${plate(v)||'blank'}`};
+  return {key:'valid',short:`P${esc(v.plymouthPlateNumber||'—')} ✓`,title:'Plymouth register plate matches Autocab'};
 }
-function renderCounts(){
-  const all=vehicles.map(statusFor);const data=[['Working',all.filter(x=>x.key==='working').length,'working'],['Offline',all.filter(x=>x.key==='offline').length,'offline'],['Suspended',all.filter(x=>x.key==='suspended').length,'suspended'],['Total',vehicles.length,'total']];
-  $('statusCounts').innerHTML=data.map(([l,n,k])=>`<div class="count ${k}"><span>${l}</span><strong>${n}</strong></div>`).join('');
+function renderCounts(rows){
+  const values={working:0,offline:0,suspended:0,total:rows.length};rows.forEach(v=>values[statusFor(v).key]++);
+  $('statusCounts').innerHTML=[['working','Working'],['offline','Offline'],['suspended','Suspended'],['total','Total']].map(([k,l])=>`<div class="count ${k}"><span>${l}</span><strong>${values[k]||0}</strong></div>`).join('');
 }
 function render(){
-  const q=norm($('searchInput').value),f=$('statusFilter').value;
-  let list=vehicles.filter(v=>{const st=statusFor(v),np=nacPermit(v),cp=cityPermit(v);const search=!q||norm(`${cs(v)}${reg(v)}${plate(v)}${v.plymouthPlateNumber||''}`).includes(q);const issue=np.key==='issue'||cp.key==='issue';return search&&(f==='all'||f===st.key||(f==='issues'&&issue));});
-  list.sort((a,b)=>Number(cs(a))-Number(cs(b)));renderCounts();
-  $('rows').innerHTML=list.length?list.map(v=>{const st=statusFor(v),np=nacPermit(v),cp=cityPermit(v);return `<article class="rank-row ${st.key}" title="${esc(np.title)}. ${esc(cp.title)}"><span class="callsign">${esc(cs(v)||'—')}</span><span class="status ${st.key}">${esc(st.label)}</span><span class="registration">${esc(reg(v)||'—')}</span><span class="permit ${np.key}">${np.short}</span><span class="city ${cp.key}">${cp.short}</span></article>`}).join(''):'<div class="message">No vehicles match this view.</div>';
+  const q=norm($('searchInput').value),filter=$('statusFilter').value;
+  const rows=vehicles.filter(v=>{const st=statusFor(v),np=nacPermit(v),cp=cityPermit(v);const search=!q||[cs(v),reg(v),plate(v),v.plymouthPlateNumber].some(x=>norm(x).includes(q));const pass=filter==='all'||st.key===filter||(filter==='issues'&&(np.key==='issue'||cp.key==='issue'));return search&&pass;});
+  renderCounts(vehicles);
+  $('rows').innerHTML=rows.length?rows.map(v=>{const st=statusFor(v),np=nacPermit(v),cp=cityPermit(v);return `<article class="rank-row ${st.key}" title="${esc(np.title)}. ${esc(cp.title)}"><span class="callsign">${esc(cs(v)||'—')}</span><span class="status ${st.key}">${esc(st.label)}</span><span class="registration">${esc(reg(v)||'—')}</span><span class="plate-number">${esc(plate(v)||'—')}</span><span class="permit ${np.key}">${np.short}</span><span class="city ${cp.key}">${cp.short}</span></article>`}).join(''):'<div class="message">No vehicles match this view.</div>';
 }
 async function loadVehicles(){const r=await fetch('/api/rank-vehicles',{cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.error||'Unable to load rank vehicles');vehicles=getList(d);}
 async function loadStatus(){const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)return;statuses=new Map(getList(await r.json()).map(x=>[norm(x.callsign),x]));}

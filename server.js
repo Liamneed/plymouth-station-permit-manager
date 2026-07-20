@@ -1011,15 +1011,32 @@ app.get("/api/rank-vehicles", async (_req,res)=>{
     const list=all.filter(isNeedACabRankVehicle);
     const cityRegister=plymouthRegisterMap();
     const vehicles=await mapWithConcurrency(list,PERMIT_DETAIL_CONCURRENCY,async v=>{
-      const city=cityRegister.get(normalizeRegistration(v?.registration));
+      let detail=v;
+      try {
+        const vehicleId=getVehicleId(v);
+        if(vehicleId!==null&&vehicleId!==undefined&&vehicleId!=="") {
+          detail=await autocabRequest(`https://autocab-api.azure-api.net/vehicle/v1/vehicles/${encodeURIComponent(vehicleId)}`);
+        }
+      } catch(error) {
+        console.warn(`Rank detail lookup failed for vehicle ${getVehicleId(v)??"unknown"}:`,error.message);
+      }
+      const registration=detail?.registration??v?.registration??"";
+      // On this Autocab configuration the taxi plate is commonly stored in the
+      // vehicle Name field. Keep plateNumber and other aliases as fallbacks.
+      const autocabPlate=detail?.name??detail?.plateNumber??detail?.plate??v?.name??v?.plateNumber??v?.plate??null;
+      const city=cityRegister.get(normalizeRegistration(registration));
       return {
         ...v,
-        isSuspended:v?.isSuspended===true,
-        permitExpiryDate:await fetchVehiclePermitExpiry(v),
+        ...detail,
+        registration,
+        plateNumber:autocabPlate,
+        autocabPlateNumber:autocabPlate,
+        isSuspended:detail?.isSuspended===true||v?.isSuspended===true,
+        permitExpiryDate:detail?.motExpiryDate??await fetchVehiclePermitExpiry(v),
         plymouthRegisterLoaded:cityRegister.size>0,
         plymouthListed:Boolean(city),
         plymouthPlateNumber:city?.plateNumber||null,
-        plymouthPlateMatch:Boolean(city)&&normalizePlate(city.plateNumber)===normalizePlate(v?.plateNumber),
+        plymouthPlateMatch:Boolean(city)&&normalizePlate(city.plateNumber)===normalizePlate(autocabPlate),
       };
     });
     vehicles.sort((a,b)=>Number(a.callsign??a.callSign??0)-Number(b.callsign??b.callSign??0));
@@ -1147,6 +1164,7 @@ async function getPlymouthRegisterWithComparison() {
       needACabPermitExpiryDisplay: managed?.permitExpiryDisplay || null,
       needACabPermitStatus: managed?.status || null,
       needACabPermitStatusLabel: managed?.statusLabel || null,
+      needACabDaysUntilExpiry: managed?.daysUntilExpiry ?? null,
       plateMatch: managed ? normalizePlate(managed.plateNumber) === normalizePlate(row.plateNumber) : null,
     };
   });
@@ -1239,7 +1257,7 @@ async function loadHackneyPermitDashboard() {
         rowVersion: detail.rowVersion,
         callsign: String(detail.callsign ?? ""),
         registration: String(detail.registration ?? ""),
-        plateNumber: String(detail.plateNumber ?? ""),
+        plateNumber: String(detail.name ?? detail.plateNumber ?? detail.plate ?? ""),
         permitExpiryDate: dateKey(detail.motExpiryDate),
         permitExpiryDisplay: displayDate(detail.motExpiryDate),
         status: status.key,
@@ -1254,7 +1272,7 @@ async function loadHackneyPermitDashboard() {
         vehicleId: vehicle.id,
         callsign: String(vehicle.callsign ?? ""),
         registration: String(vehicle.registration ?? ""),
-        plateNumber: String(vehicle.plateNumber ?? ""),
+        plateNumber: String(vehicle.name ?? vehicle.plateNumber ?? vehicle.plate ?? ""),
         permitExpiryDate: null,
         permitExpiryDisplay: "—",
         status: "error",
