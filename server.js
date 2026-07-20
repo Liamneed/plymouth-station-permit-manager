@@ -853,13 +853,38 @@ function requireCsrf(req, res, next) {
 }
 app.get("/permit-login", (_req, res) => res.sendFile(path.join(__dirname, "public", "permit-login.html")));
 app.post("/api/permit-login", (req, res) => {
-  if (!ADMIN_PASSWORD) return res.status(503).json({ error: "Set ADMIN_PASSWORD in .env first." });
+  if (!ADMIN_PASSWORD) {
+    return res.status(503).json({
+      error: "Set ADMIN_PASSWORD in .env first.",
+    });
+  }
+
   const supplied = String(req.body?.password || "");
-  const a = Buffer.from(supplied); const b = Buffer.from(ADMIN_PASSWORD);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: "Incorrect password." });
+  const suppliedBuffer = Buffer.from(supplied);
+  const storedBuffer = Buffer.from(ADMIN_PASSWORD);
+
+  if (
+    suppliedBuffer.length !== storedBuffer.length ||
+    !crypto.timingSafeEqual(suppliedBuffer, storedBuffer)
+  ) {
+    return res.status(401).json({
+      error: "Incorrect password.",
+    });
+  }
+
   const { token, csrf } = createAdminSession();
-  res.setHeader("Set-Cookie", `permit_admin=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(ADMIN_SESSION_TTL_MS/1000)}${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
-  res.json({ ok: true, csrf });
+
+  res.setHeader(
+    "Set-Cookie",
+    `permit_admin=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(
+      ADMIN_SESSION_TTL_MS / 1000
+    )}`
+  );
+
+  return res.json({
+    ok: true,
+    csrf,
+  });
 });
 app.post("/api/permit-logout", requireAdmin, (req, res) => { authSessions.delete(req.adminSession.token); res.setHeader("Set-Cookie", "permit_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"); res.json({ ok: true }); });
 app.get("/api/permit-auth", requireAdmin, (req, res) => res.json({ ok: true, csrf: req.adminSession.csrf }));
