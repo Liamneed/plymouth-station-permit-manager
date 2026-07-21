@@ -312,16 +312,25 @@ async function recogniseRegistrationLegacy(){
   }
 }
 $('registration').addEventListener('input',e=>{e.target.value=formatReg(e.target.value);if(normaliseReg(e.target.value)!==selectedOcrReg)clearSelectedRegistration();permit=null;stampedBlob=null;$('permitResult').className='permit-result neutral';$('permitResult').textContent='Permit not checked';updateSubmit()});
-$('photoInput').addEventListener('change',async e=>{
+async function handleSelectedPhoto(e){
   const file=e.target.files?.[0];if(!file)return;
-  originalFile=file;originalImage=await loadImage(file);
-  $('photoHelp').textContent=`${file.name} selected`;
-  permit=null;$('registration').value='';clearSelectedRegistration();
-  $('permitResult').className='permit-result neutral';$('permitResult').textContent='Permit not checked';
-  await drawStamp();updateSubmit();
-  requestGps({automatic:true});
-  await recogniseRegistration();
-});
+  try{
+    originalFile=file;originalImage=await loadImage(file);
+    $('photoHelp').textContent=`${file.name||'Photo'} selected`;
+    permit=null;$('registration').value='';clearSelectedRegistration();
+    $('permitResult').className='permit-result neutral';$('permitResult').textContent='Permit not checked';
+    await drawStamp();updateSubmit();
+    requestGps({automatic:true});
+    await recogniseRegistration();
+  }finally{
+    // Allow the same photo to be selected again after a retry.
+    e.target.value='';
+  }
+}
+$('takePhotoBtn').addEventListener('click',()=>$('cameraInput').click());
+$('choosePhotoBtn').addEventListener('click',()=>$('galleryInput').click());
+$('cameraInput').addEventListener('change',handleSelectedPhoto);
+$('galleryInput').addEventListener('change',handleSelectedPhoto);
 $('ocrBtn').addEventListener('click',recogniseRegistration);
 function loadImage(file){return new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>{URL.revokeObjectURL(img.src);resolve(img)};img.onerror=reject;img.src=URL.createObjectURL(file)})}
 function wrap(ctx,text,maxWidth){const words=String(text).split(/\s+/);const lines=[];let line='';for(const word of words){const test=line?`${line} ${word}`:word;if(ctx.measureText(test).width>maxWidth&&line){lines.push(line);line=word}else line=test}if(line)lines.push(line);return lines}

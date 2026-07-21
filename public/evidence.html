@@ -19,9 +19,13 @@
 
   <section class="card capture-panel">
     <div class="top-actions">
-      <label class="camera-button" for="photoInput">TAKE OR CHOOSE PHOTO</label>
+      <div class="photo-action-buttons">
+        <button id="takePhotoBtn" type="button" class="camera-button">TAKE PHOTO</button>
+        <button id="choosePhotoBtn" type="button" class="camera-button secondary">CHOOSE FROM PHONE</button>
+      </div>
       <button id="ocrBtn" type="button" class="secondary">SCAN AGAIN</button>
-      <input id="photoInput" type="file" accept="image/*" capture="environment">
+      <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden>
+      <input id="galleryInput" type="file" accept="image/*" hidden>
     </div>
 
     <div class="preview-wrap">
