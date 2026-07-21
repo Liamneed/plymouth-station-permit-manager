@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07111f">
+  <title>Taxi Permit Evidence</title>
+  <link rel="stylesheet" href="/evidence.css">
+</head>
+<body>
+<main class="shell">
+  <header class="compact-header">
+    <div>
+      <p class="eyebrow">PLYMOUTH PERMIT MANAGER</p>
+      <h1>Taxi evidence</h1>
+    </div>
+    <a href="/permits">Permit lookup</a>
+  </header>
+
+  <section class="card capture-panel">
+    <div class="top-actions">
+      <label class="camera-button" for="photoInput">TAKE OR CHOOSE PHOTO</label>
+      <button id="ocrBtn" type="button" class="secondary">SCAN AGAIN</button>
+      <input id="photoInput" type="file" accept="image/*" capture="environment">
+    </div>
+
+    <div class="preview-wrap">
+      <canvas id="previewCanvas"></canvas>
+      <p id="photoHelp" class="help">No photograph selected.</p>
+    </div>
+
+    <div id="ocrStatus" class="ocr-status neutral">Take a photo and the app will read the plate, request GPS and check the permit automatically.</div>
+
+    <div id="ocrChoices" class="ocr-choices" hidden>
+      <p>Best match is selected. Tap another registration to change it:</p>
+      <div id="ocrChoiceButtons" class="ocr-choice-buttons"></div>
+      <div id="selectedRegSummary" class="selected-reg-summary" hidden aria-live="polite"></div>
+    </div>
+
+    <div class="reg-row">
+      <input id="registration" maxlength="10" autocomplete="off" autocapitalize="characters" placeholder="AB12 CDE" aria-label="Vehicle registration">
+      <button id="checkBtn" type="button">CONFIRM</button>
+    </div>
+    <div id="permitResult" class="permit-result neutral">Permit not checked</div>
+
+    <div class="location-strip">
+      <div class="location-main">
+        <label for="locationLabel">Location</label>
+        <input id="locationLabel" placeholder="GPS location will appear here">
+        <p id="gpsStatus" class="help">GPS will be requested automatically after a photo is selected.</p>
+      </div>
+      <button id="gpsBtn" type="button" class="secondary">REFRESH GPS</button>
+    </div>
+
+    <div id="locationChoices" class="location-choices" hidden>
+      <p>Choose location:</p>
+      <div id="locationChoiceButtons" class="location-choice-buttons"></div>
+    </div>
+
+    <details class="more-details">
+      <summary>Notes and email test</summary>
+      <label for="notes">Notes</label>
+      <textarea id="notes" rows="2" placeholder="Vehicle observed working from the station rank."></textarea>
+      <div class="email-inline">
+        <div>
+          <strong>Email delivery test</strong>
+          <p id="emailConfigStatus" class="help">Checking email configuration…</p>
+        </div>
+        <button id="testEmailBtn" type="button" class="secondary" disabled>SEND TEST</button>
+      </div>
+      <p id="testEmailStatus" class="email-test-status neutral">This sends a simple test message only.</p>
+    </details>
+
+    <div class="submit-row">
+      <button id="stampBtn" type="button" class="secondary">REFRESH</button>
+      <button id="submitBtn" type="button" disabled>SUBMIT EVIDENCE</button>
+    </div>
+    <p id="submitStatus" class="help"></p>
+
+    <!-- Kept hidden for backwards compatibility with the OCR script. -->
+    <div id="angleAssist" class="hidden-tools" hidden aria-hidden="true">
+      <canvas id="cropCanvas"></canvas>
+      <span id="cornerStatus"></span>
+      <button id="resetCornersBtn" type="button"></button>
+      <button id="scanCropBtn" type="button" disabled></button>
+    </div>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="/evidence.js"></script>
+</body>
+</html>

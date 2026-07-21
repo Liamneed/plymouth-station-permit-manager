@@ -4,7 +4,9 @@
   "private": true,
   "description": "Plymouth Station Hackney rank, permit lookup and secure GWR permit management application.",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
@@ -16,6 +18,7 @@
     "express": "^4.19.2",
     "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
+    "nodemailer": "^6.10.1",
     "xlsx": "^0.18.5"
   }
 }

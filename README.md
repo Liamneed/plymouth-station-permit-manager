@@ -138,3 +138,29 @@ For Coolify, mount persistent storage at `/app/data` and set `DATA_DIR=/app/data
 - `/rank` now uses `/api/rank-vehicles` and only shows active Need-A-Cab Hackneys with the H capability and callsigns 900-999.
 - The rank screen keeps the live Need-A-Cab permit state and shows the Plymouth register result separately on one compact line.
 - `/permits` is a citywide Plymouth register table with mobile filters for all records, Need-A-Cab vehicles, other operators and exceptions.
+
+## Mobile evidence capture (test build)
+
+Open `/evidence` to take or choose a taxi photograph, confirm the registration, check the Plymouth permit register, capture GPS, generate a stamped copy and save the evidence bundle.
+
+Evidence is stored under `DATA_DIR/evidence/YYYY-MM-DD/` as:
+
+- original photograph
+- stamped JPEG
+- JSON metadata including permit result, coordinates and SHA-256 hashes
+
+Email is optional. Configure `EVIDENCE_EMAIL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` and `SMTP_FROM`. Without SMTP, submissions are still saved locally for testing.
+
+Camera and GPS on a physical phone require HTTPS. Desktop localhost can be used to test image selection and the remaining workflow.
+
+### Test email button
+
+The `/evidence` page includes **Send test email**. It verifies the SMTP connection and sends a simple message to the server-side `EVIDENCE_EMAIL` recipient without saving an evidence record. The recipient cannot be changed from the public page, preventing the application from becoming an open email relay.
+
+## Enhanced angled-plate recognition test
+
+The evidence page now includes multi-pass OCR voting, UK-format-aware character corrections and an Angle / Crop Assist tool. For difficult photographs, mark the four number-plate corners in this order: top-left, top-right, bottom-right, bottom-left. The app rectifies the selected quadrilateral and scans multiple enhanced versions before checking candidates against the permit register. A person must still confirm the registration before evidence is submitted.
+
+## Reliable number-plate recognition update
+
+The evidence page now scans the untouched original photograph before any evidence overlay is drawn. It automatically finds bright UK plate-shaped regions, crops and enlarges them, runs several OCR preprocessing passes, corrects common letter/number confusions, validates UK registration formats and ranks matches against the Plymouth permit register. Difficult photographs can still use the four-corner Angle / Crop Assist. A human must confirm the registration before evidence is submitted.

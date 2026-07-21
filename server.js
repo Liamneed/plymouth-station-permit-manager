@@ -8,6 +8,7 @@ import path from "path";
 import crypto from "crypto";
 import multer from "multer";
 import XLSX from "xlsx";
+import nodemailer from "nodemailer";
 import { fileURLToPath } from "url";
 
 dotenv.config();
@@ -29,6 +30,16 @@ const PLYMOUTH_REGISTER_FILE = path.join(DATA_DIR, "plymouth-permits.json");
 const PLYMOUTH_REGISTER_BACKUP_FILE = path.join(DATA_DIR, "plymouth-permits-backup.json");
 const PLYMOUTH_REGISTER_SEED_FILE = path.join(__dirname, "plymouth-permits-seed.json");
 fs.mkdirSync(DATA_DIR, { recursive: true });
+const EVIDENCE_DIR = path.join(DATA_DIR, "evidence");
+const EVIDENCE_EMAIL = String(process.env.EVIDENCE_EMAIL || "").trim();
+const SMTP_HOST = String(process.env.SMTP_HOST || "").trim();
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() === "true";
+const SMTP_USER = String(process.env.SMTP_USER || "").trim();
+const SMTP_PASS = String(process.env.SMTP_PASS || "");
+const SMTP_FROM = String(process.env.SMTP_FROM || SMTP_USER || "").trim();
+fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
+
 
 const normalizeRegistration = (value) => String(value ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
 const normalizePlate = (value) => String(value ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -83,7 +94,7 @@ app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
   res.setHeader("Referrer-Policy", "same-origin");
-  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Permissions-Policy", "camera=(self), microphone=(), geolocation=(self)");
   if (process.env.NODE_ENV === "production" && req.secure) {
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   }
@@ -1291,6 +1302,265 @@ async function loadHackneyPermitDashboard() {
   return { permits, summary, generatedAt: new Date().toISOString() };
 }
 
+
+
+// ---------- Mobile evidence capture ----------
+const evidenceUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024, files: 2 },
+  fileFilter: (_req, file, cb) => {
+    if (!/^image\/(jpeg|png|webp)$/i.test(file.mimetype)) {
+      return cb(Object.assign(new Error("Only JPEG, PNG or WebP photographs are accepted."), { status: 400 }));
+    }
+    cb(null, true);
+  },
+});
+
+function evidencePermitResult(record, registration) {
+  if (!record) {
+    return {
+      registration,
+      valid: false,
+      key: "not-listed",
+      label: "NO VALID PERMIT",
+      detail: "Vehicle is not listed in the current Plymouth permit register.",
+      plateNumber: null,
+      needACab: false,
+    };
+  }
+  if (!record.needACab) {
+    return {
+      registration,
+      valid: true,
+      key: "valid",
+      label: "VALID PERMIT",
+      detail: `Plymouth taxi plate ${record.plateNumber}.`,
+      plateNumber: record.plateNumber,
+      needACab: false,
+    };
+  }
+  if (record.plateMatch === false) {
+    return {
+      registration,
+      valid: false,
+      key: "mismatch",
+      label: "PLATE MISMATCH",
+      detail: `Plymouth plate ${record.plateNumber || "unknown"}; Autocab plate ${record.needACabPlateNumber || "unknown"}.`,
+      plateNumber: record.plateNumber,
+      needACab: true,
+      callsign: record.callsign,
+    };
+  }
+  const status = record.needACabPermitStatus || "missing";
+  const days = Number(record.needACabDaysUntilExpiry);
+  const valid = status === "valid" || status === "expiring";
+  let label = "NO VALID PERMIT";
+  if (status === "valid") label = "VALID PERMIT";
+  if (status === "expiring") label = Number.isFinite(days) ? `VALID – DUE IN ${Math.max(0, days)} DAY${days === 1 ? "" : "S"}` : "VALID – DUE SOON";
+  if (status === "expired") label = Number.isFinite(days) ? `EXPIRED ${Math.abs(days)} DAY${Math.abs(days) === 1 ? "" : "S"} AGO` : "EXPIRED";
+  if (status === "missing") label = "NO PERMIT DATE";
+  return {
+    registration, valid, key: status, label,
+    detail: record.needACabPermitStatusLabel || "Need-A-Cab permit status.",
+    plateNumber: record.plateNumber, needACab: true, callsign: record.callsign,
+    expiryDate: record.needACabPermitExpiryDate, expiryDisplay: record.needACabPermitExpiryDisplay,
+    daysUntilExpiry: Number.isFinite(days) ? days : null,
+  };
+}
+
+app.get("/evidence", (_req, res) => res.sendFile(path.join(__dirname, "public", "evidence.html")));
+
+app.get("/api/evidence/check", async (req, res) => {
+  try {
+    const registration = normalizeRegistration(req.query.registration || req.query.reg || "");
+    if (!registration) return res.status(400).json({ error: "Enter a vehicle registration." });
+    const data = await getPlymouthRegisterWithComparison();
+    const record = data.records.find(row => normalizeRegistration(row.registration) === registration);
+    res.json({
+      ...evidencePermitResult(record, registration),
+      checkedAt: new Date().toISOString(),
+      registerUpdatedAt: data.updatedAt,
+      sourceFile: data.sourceFile,
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || "Permit check failed." });
+  }
+});
+
+app.get("/api/evidence/reverse-geocode", async (req, res) => {
+  try {
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return res.status(400).json({ error: "Valid latitude and longitude are required." });
+    }
+    const url = new URL("https://nominatim.openstreetmap.org/reverse");
+    url.searchParams.set("format", "jsonv2");
+    url.searchParams.set("lat", String(lat));
+    url.searchParams.set("lon", String(lon));
+    url.searchParams.set("zoom", "18");
+    url.searchParams.set("addressdetails", "1");
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Plymouth-Permit-Manager/1.1 (evidence location lookup)",
+        "Accept-Language": "en-GB,en;q=0.9",
+      },
+    });
+    if (!response.ok) throw new Error(`Address lookup failed (${response.status}).`);
+    const data = await response.json();
+    const a = data.address || {};
+    const road = a.road || a.pedestrian || a.footway || a.residential || a.path || "";
+    const area = a.suburb || a.neighbourhood || a.quarter || a.city_district || "";
+    const city = a.city || a.town || a.village || a.municipality || "Plymouth";
+    const postcode = a.postcode || "";
+    const suggestions = [
+      [road, area].filter(Boolean).join(", "),
+      [road, city].filter(Boolean).join(", "),
+      [area, city].filter(Boolean).join(", "),
+      [road, area, city, postcode].filter(Boolean).join(", "),
+      data.display_name || "",
+    ].filter(Boolean);
+    res.json({ ok: true, suggestions: [...new Set(suggestions)].slice(0, 4), address: a });
+  } catch (error) {
+    console.error("Reverse geocode failed:", error);
+    res.status(502).json({ error: error.message || "Unable to determine street or area." });
+  }
+});
+
+function evidenceTransporter() {
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !SMTP_FROM || !EVIDENCE_EMAIL) return null;
+  return nodemailer.createTransport({
+    host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_SECURE,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+}
+
+function maskEmailAddress(value) {
+  const email = String(value || "").trim();
+  const at = email.indexOf("@");
+  if (at <= 1) return email || null;
+  const name = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  return `${name.slice(0, 2)}${"*".repeat(Math.max(2, name.length - 2))}@${domain}`;
+}
+
+app.get("/api/evidence/email-status", (_req, res) => {
+  const configured = Boolean(evidenceTransporter());
+  res.json({
+    configured,
+    recipient: configured ? maskEmailAddress(EVIDENCE_EMAIL) : null,
+    host: configured ? SMTP_HOST : null,
+    port: configured ? SMTP_PORT : null,
+    secure: configured ? SMTP_SECURE : null,
+  });
+});
+
+app.post("/api/evidence/test-email", express.json({ limit: "16kb" }), async (req, res) => {
+  try {
+    const transporter = evidenceTransporter();
+    if (!transporter) {
+      return res.status(400).json({
+        error: "Test email is not configured. Add EVIDENCE_EMAIL and the SMTP settings to .env, then restart the server.",
+      });
+    }
+
+    await transporter.verify();
+    const sentAt = new Date();
+    const registration = normalizeRegistration(req.body?.registration || "");
+    const permitLabel = String(req.body?.permitLabel || "Not checked").trim();
+    const subject = `Plymouth Permit Manager – Test Email – ${sentAt.toLocaleString("en-GB")}`;
+    const text = [
+      "This is a test email from the Plymouth Permit Manager evidence page.",
+      "",
+      `Sent: ${sentAt.toLocaleString("en-GB")}`,
+      `Registration on screen: ${registration || "Not entered"}`,
+      `Permit result on screen: ${permitLabel || "Not checked"}`,
+      "",
+      "SMTP verification and email delivery both completed successfully.",
+      "No evidence record was created by this test.",
+    ].join("\n");
+
+    const info = await transporter.sendMail({
+      from: SMTP_FROM,
+      to: EVIDENCE_EMAIL,
+      subject,
+      text,
+    });
+
+    res.json({
+      ok: true,
+      recipient: maskEmailAddress(EVIDENCE_EMAIL),
+      messageId: info.messageId || null,
+      message: `Test email sent to ${maskEmailAddress(EVIDENCE_EMAIL)}.`,
+    });
+  } catch (error) {
+    console.error("Evidence test email failed:", error);
+    res.status(500).json({
+      error: error.message || "Test email failed. Check the SMTP settings and server logs.",
+    });
+  }
+});
+
+app.post("/api/evidence/submit", evidenceUpload.fields([{ name: "original", maxCount: 1 }, { name: "stamped", maxCount: 1 }]), async (req, res) => {
+  try {
+    const original = req.files?.original?.[0];
+    const stamped = req.files?.stamped?.[0];
+    if (!original || !stamped) return res.status(400).json({ error: "Original and stamped photographs are required." });
+    const registration = normalizeRegistration(req.body.registration || "");
+    if (!registration) return res.status(400).json({ error: "Confirm the vehicle registration." });
+    const data = await getPlymouthRegisterWithComparison();
+    const record = data.records.find(row => normalizeRegistration(row.registration) === registration);
+    const permit = evidencePermitResult(record, registration);
+    const now = new Date();
+    const reference = `EVD-${now.toISOString().replace(/[-:TZ.]/g, "").slice(0, 14)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
+    const folder = path.join(EVIDENCE_DIR, now.toISOString().slice(0, 10));
+    fs.mkdirSync(folder, { recursive: true });
+    const originalExt = original.mimetype.includes("png") ? "png" : original.mimetype.includes("webp") ? "webp" : "jpg";
+    const originalPath = path.join(folder, `${reference}-original.${originalExt}`);
+    const stampedPath = path.join(folder, `${reference}-stamped.jpg`);
+    fs.writeFileSync(originalPath, original.buffer);
+    fs.writeFileSync(stampedPath, stamped.buffer);
+    const metadata = {
+      reference, registration, observedAt: req.body.observedAt || now.toISOString(),
+      submittedAt: now.toISOString(), latitude: req.body.latitude || null, longitude: req.body.longitude || null,
+      accuracy: req.body.accuracy || null, locationLabel: req.body.locationLabel || null, notes: req.body.notes || "",
+      permit, registerUpdatedAt: data.updatedAt, sourceFile: data.sourceFile,
+      originalSha256: crypto.createHash("sha256").update(original.buffer).digest("hex"),
+      stampedSha256: crypto.createHash("sha256").update(stamped.buffer).digest("hex"),
+    };
+    fs.writeFileSync(path.join(folder, `${reference}.json`), JSON.stringify(metadata, null, 2));
+
+    let emailed = false;
+    let emailMessage = "Saved for testing. SMTP email is not configured.";
+    const transporter = evidenceTransporter();
+    if (transporter) {
+      const subject = `Plymouth Station Permit Evidence – ${registration} – ${permit.label}`;
+      const body = [
+        `Evidence reference: ${reference}`, `Registration: ${registration}`, `Observed: ${metadata.observedAt}`,
+        `Location: ${metadata.locationLabel || "Not entered"}`,
+        `GPS: ${metadata.latitude && metadata.longitude ? `${metadata.latitude}, ${metadata.longitude}` : "Not available"}`,
+        `GPS accuracy: ${metadata.accuracy ? `${metadata.accuracy} metres` : "Not available"}`,
+        `Permit result: ${permit.label}`, `Details: ${permit.detail}`,
+        `Plymouth plate: ${permit.plateNumber || "Not listed"}`, `Need-A-Cab: ${permit.needACab ? "Yes" : "No"}`,
+        `Notes: ${metadata.notes || "None"}`, `Register updated: ${metadata.registerUpdatedAt || "Unknown"}`,
+      ].join("\n");
+      await transporter.sendMail({
+        from: SMTP_FROM, to: EVIDENCE_EMAIL, subject, text: body,
+        attachments: [
+          { filename: `${reference}-original.${originalExt}`, content: original.buffer, contentType: original.mimetype },
+          { filename: `${reference}-stamped.jpg`, content: stamped.buffer, contentType: "image/jpeg" },
+          { filename: `${reference}.json`, content: JSON.stringify(metadata, null, 2), contentType: "application/json" },
+        ],
+      });
+      emailed = true; emailMessage = `Evidence emailed to ${EVIDENCE_EMAIL}.`;
+    }
+    res.json({ ok: true, reference, permit, emailed, message: emailMessage });
+  } catch (error) {
+    console.error("Evidence submission failed:", error);
+    res.status(error.status || 500).json({ error: error.message || "Evidence submission failed." });
+  }
+});
+
 app.get("/dashboard", requireAdmin, (_req, res) => res.sendFile(path.join(__dirname, "public", "permit-manager.html")));
 app.get("/permit-manager", requireAdmin, (_req, res) => res.sendFile(path.join(__dirname, "public", "permit-manager.html")));
 app.get("/permit-manager.html", requireAdmin, (_req, res) => res.sendFile(path.join(__dirname, "public", "permit-manager.html")));
@@ -1410,6 +1680,8 @@ app.get("/", requireAdmin, (_req, res) => {
 });
 
 // Existing secure dashboard routes.
+
+
 app.get("/dashboard", requireAdmin, (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "permit-manager.html"));
 });

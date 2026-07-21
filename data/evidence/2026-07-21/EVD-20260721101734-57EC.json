@@ -1,0 +1,24 @@
+{
+  "reference": "EVD-20260721101734-57EC",
+  "registration": "SF59JVZ",
+  "observedAt": "2026-07-21T10:17:34.277Z",
+  "submittedAt": "2026-07-21T10:17:34.293Z",
+  "latitude": "50.38103274008512",
+  "longitude": "-4.165941145132275",
+  "accuracy": "35",
+  "locationLabel": "Devonport Road, Stoke",
+  "notes": "",
+  "permit": {
+    "registration": "SF59JVZ",
+    "valid": false,
+    "key": "not-listed",
+    "label": "NO VALID PERMIT",
+    "detail": "Vehicle is not listed in the current Plymouth permit register.",
+    "plateNumber": null,
+    "needACab": false
+  },
+  "registerUpdatedAt": "2026-07-20T00:00:00.000Z",
+  "sourceFile": "Plymouth Plate Report.xlsx",
+  "originalSha256": "ba9527c54bc13feaad451050dbebd0aad19a03a12fb9ca2a4b6c7f1257f0cd47",
+  "stampedSha256": "2371fb3f5af8f7d61f54d6570eb1db958a55f2f84bb47e2b44434912d0b68fcb"
+}
