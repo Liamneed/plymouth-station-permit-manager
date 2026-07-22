@@ -1,6 +1,7 @@
 const $=id=>document.getElementById(id);
 let originalFile=null,originalImage=null,stampedBlob=null,permit=null,coords={latitude:null,longitude:null,accuracy:null};
 let selectedOcrReg='';
+let confirmedReg='';
 let ocrWorker=null,ocrBusy=false;
 const normaliseReg=v=>String(v||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
 function formatReg(v){const n=normaliseReg(v);return n.length>4?`${n.slice(0,n.length-3)} ${n.slice(-3)}`:n}
@@ -214,24 +215,55 @@ async function getOcrWorker(){
   });
   return ocrWorker;
 }
+function isCompleteUkRegistration(value){
+  const n=normaliseReg(value);
+  return /^(?:[A-Z]{2}\d{2}[A-Z]{3}|[A-Z]\d{1,3}[A-Z]{3}|[A-Z]{3}\d{1,3}[A-Z]|[A-Z]{1,3}\d{1,4}|\d{1,4}[A-Z]{1,3})$/.test(n);
+}
 function markSelectedRegistration(value,source='option'){
   const reg=normaliseReg(value);
   selectedOcrReg=reg;
+  confirmedReg='';
   document.querySelectorAll('#ocrChoiceButtons button').forEach(button=>{
     const active=normaliseReg(button.dataset.registration)===reg;
     button.classList.toggle('selected',active);
     button.setAttribute('aria-pressed',active?'true':'false');
   });
   const input=$('registration');
-  input.classList.toggle('confirmed',Boolean(reg));
+  input.classList.remove('confirmed');
   const summary=$('selectedRegSummary');
   if(summary){
     summary.hidden=!reg;
-    summary.innerHTML=reg?`Selected registration: <strong>${formatReg(reg)}</strong>${source==='automatic'?' — check it against the photograph.':' — confirmed from the options.'}`:'';
+    summary.innerHTML=reg?`Selected registration: <strong>${formatReg(reg)}</strong> — press CONFIRM after checking the photograph.`:'';
   }
+  permit=null;stampedBlob=null;
+  $('permitResult').className='permit-result neutral';
+  $('permitResult').textContent='Confirm the registration to check the permit';
+  drawStamp();
+  updateSubmit();
+}
+function confirmSelectedRegistration(){
+  const reg=normaliseReg($('registration').value);
+  if(!reg||!isCompleteUkRegistration(reg)){
+    alert('Enter or select a complete UK registration first.');
+    return false;
+  }
+  selectedOcrReg=reg;
+  confirmedReg=reg;
+  document.querySelectorAll('#ocrChoiceButtons button').forEach(button=>{
+    const active=normaliseReg(button.dataset.registration)===reg;
+    button.classList.toggle('selected',active);
+    button.setAttribute('aria-pressed',active?'true':'false');
+  });
+  $('registration').classList.add('confirmed');
+  const summary=$('selectedRegSummary');
+  if(summary){
+    summary.hidden=false;
+    summary.innerHTML=`Confirmed registration: <strong>${formatReg(reg)}</strong>`;
+  }
+  return true;
 }
 function clearSelectedRegistration(){
-  selectedOcrReg='';
+  selectedOcrReg='';confirmedReg='';
   document.querySelectorAll('#ocrChoiceButtons button').forEach(button=>{
     button.classList.remove('selected');button.setAttribute('aria-pressed','false');
   });
@@ -241,21 +273,22 @@ function clearSelectedRegistration(){
 function showOcrChoices(candidates){
   const wrap=$('ocrChoices'),holder=$('ocrChoiceButtons');
   holder.innerHTML='';
-  const unique=[...new Map(candidates.slice(0,6).map(x=>[x.value,x])).values()];
+  const unique=[...new Map(candidates.filter(x=>isCompleteUkRegistration(x.value)).slice(0,6).map(x=>[normaliseReg(x.value),x])).values()];
   if(!unique.length){wrap.hidden=true;clearSelectedRegistration();return}
   unique.forEach((candidate,index)=>{
     const button=document.createElement('button');
-    button.type='button';button.textContent=formatReg(candidate.value);
+    button.type='button';
+    const source=candidate.source||'Browser fallback';
+    const confidence=Number.isFinite(candidate.apiConfidence)?` · ${candidate.apiConfidence.toFixed(1)}%`:'';
+    button.innerHTML=`<span class="choice-reg">${formatReg(candidate.value)}${confidence}</span><span class="choice-source">${source}</span>`;
     button.dataset.registration=candidate.value;
     button.setAttribute('aria-pressed','false');
     if(index===0)button.classList.add('best');
-    const matched=candidate.registerResult&&candidate.registerResult.key!=='not-listed';
-    button.title=matched?'Found in the Plymouth permit register':'OCR registration option';
-    button.addEventListener('click',async()=>{
-      $('registration').value=formatReg(candidate.value);permit=null;stampedBlob=null;
+    button.title=`${source}${confidence}`;
+    button.addEventListener('click',()=>{
+      $('registration').value=formatReg(candidate.value);
       markSelectedRegistration(candidate.value,'option');
-      setOcrStatus(`Selected ${formatReg(candidate.value)}. Permit checked below.`,'success');
-      await checkPermit();
+      setOcrStatus(`Selected ${formatReg(candidate.value)}. Check the photograph, then press CONFIRM.`,'success');
     });
     holder.appendChild(button);
   });
@@ -303,7 +336,6 @@ async function recogniseRegistrationLegacy(){
     const correction=best.ocrSource&&best.ocrSource!==best.value?` OCR first read ${formatReg(best.ocrSource)}, but the permit register matched ${formatReg(best.value)}.`:'';
     setOcrStatus(`${registerMatched?'Permit-register match: ':'Detected '}${formatReg(best.value)}.${correction}${alternatives.length?` Other possibilities: ${alternatives.join(', ')}.`:''} Please confirm it is correct.`,'success');
     await drawStamp();
-    await checkPermit();
   }catch(error){
     console.error('OCR error',error);
     setOcrStatus(`Automatic reading failed: ${error.message}. You can still enter the registration manually.`,'error');
@@ -311,13 +343,13 @@ async function recogniseRegistrationLegacy(){
     ocrBusy=false;$('ocrBtn').disabled=false;updateSubmit();
   }
 }
-$('registration').addEventListener('input',e=>{e.target.value=formatReg(e.target.value);if(normaliseReg(e.target.value)!==selectedOcrReg)clearSelectedRegistration();permit=null;stampedBlob=null;$('permitResult').className='permit-result neutral';$('permitResult').textContent='Permit not checked';updateSubmit()});
+$('registration').addEventListener('input',e=>{e.target.value=formatReg(e.target.value);const reg=normaliseReg(e.target.value);if(reg!==selectedOcrReg)clearSelectedRegistration();confirmedReg='';permit=null;stampedBlob=null;$('registration').classList.remove('confirmed');$('permitResult').className='permit-result neutral';$('permitResult').textContent='Confirm the registration to check the permit';drawStamp();updateSubmit()});
 async function handleSelectedPhoto(e){
   const file=e.target.files?.[0];if(!file)return;
   try{
     originalFile=file;originalImage=await loadImage(file);
     $('photoHelp').textContent=`${file.name||'Photo'} selected`;
-    permit=null;$('registration').value='';clearSelectedRegistration();
+    permit=null;confirmedReg='';$('registration').value='';clearSelectedRegistration();
     $('permitResult').className='permit-result neutral';$('permitResult').textContent='Permit not checked';
     await drawStamp();updateSubmit();
     requestGps({automatic:true});
@@ -334,13 +366,13 @@ $('galleryInput').addEventListener('change',handleSelectedPhoto);
 $('ocrBtn').addEventListener('click',recogniseRegistration);
 function loadImage(file){return new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>{URL.revokeObjectURL(img.src);resolve(img)};img.onerror=reject;img.src=URL.createObjectURL(file)})}
 function wrap(ctx,text,maxWidth){const words=String(text).split(/\s+/);const lines=[];let line='';for(const word of words){const test=line?`${line} ${word}`:word;if(ctx.measureText(test).width>maxWidth&&line){lines.push(line);line=word}else line=test}if(line)lines.push(line);return lines}
-async function drawStamp(){if(!originalImage)return;const canvas=$('previewCanvas'),max=1800,scale=Math.min(1,max/Math.max(originalImage.width,originalImage.height));canvas.width=Math.round(originalImage.width*scale);canvas.height=Math.round(originalImage.height*scale);const ctx=canvas.getContext('2d');ctx.drawImage(originalImage,0,0,canvas.width,canvas.height);const pad=Math.max(20,Math.round(canvas.width*.025)),font=Math.max(24,Math.round(canvas.width*.027));ctx.font=`800 ${font}px system-ui`;const lines=[`PLYMOUTH TAXI EVIDENCE`, `REG: ${formatReg($('registration').value)||'NOT CONFIRMED'}`, new Date().toLocaleString('en-GB'), `LOCATION: ${$('locationLabel').value||'NOT ENTERED'}`, coords.latitude?`GPS: ${Number(coords.latitude).toFixed(6)}, ${Number(coords.longitude).toFixed(6)} (±${Math.round(coords.accuracy)}m)`:'GPS: NOT CAPTURED', `PERMIT: ${permit?.label||'NOT CHECKED'}`];let all=[];for(const line of lines)all.push(...wrap(ctx,line,canvas.width-pad*2));const lineH=font*1.25,boxH=all.length*lineH+pad*1.5,y=canvas.height-boxH;ctx.fillStyle='rgba(0,0,0,.78)';ctx.fillRect(0,y,canvas.width,boxH);ctx.fillStyle='#fff';all.forEach((line,i)=>ctx.fillText(line,pad,y+pad+font+i*lineH));canvas.style.display='block';stampedBlob=await new Promise(r=>canvas.toBlob(r,'image/jpeg',.9));updateSubmit()}
+async function drawStamp(){if(!originalImage)return;const canvas=$('previewCanvas'),max=1800,scale=Math.min(1,max/Math.max(originalImage.width,originalImage.height));canvas.width=Math.round(originalImage.width*scale);canvas.height=Math.round(originalImage.height*scale);const ctx=canvas.getContext('2d');ctx.drawImage(originalImage,0,0,canvas.width,canvas.height);const pad=Math.max(20,Math.round(canvas.width*.025)),font=Math.max(24,Math.round(canvas.width*.027));ctx.font=`800 ${font}px system-ui`;const lines=[`PLYMOUTH TAXI EVIDENCE`, `REG: ${confirmedReg?formatReg(confirmedReg):'NOT CONFIRMED'}`, new Date().toLocaleString('en-GB'), `LOCATION: ${$('locationLabel').value||'NOT ENTERED'}`, coords.latitude?`GPS: ${Number(coords.latitude).toFixed(6)}, ${Number(coords.longitude).toFixed(6)} (±${Math.round(coords.accuracy)}m)`:'GPS: NOT CAPTURED', `PERMIT: ${permit?.label||'NOT CHECKED'}`];let all=[];for(const line of lines)all.push(...wrap(ctx,line,canvas.width-pad*2));const lineH=font*1.25,boxH=all.length*lineH+pad*1.5,y=canvas.height-boxH;ctx.fillStyle='rgba(0,0,0,.78)';ctx.fillRect(0,y,canvas.width,boxH);ctx.fillStyle='#fff';all.forEach((line,i)=>ctx.fillText(line,pad,y+pad+font+i*lineH));canvas.style.display='block';stampedBlob=await new Promise(r=>canvas.toBlob(r,'image/jpeg',.9));updateSubmit()}
 async function checkPermit(){
-  const reg=normaliseReg($('registration').value);if(!reg){alert('Enter or detect the registration first.');return}
+  const reg=normaliseReg($('registration').value);if(!reg||confirmedReg!==reg){alert('Confirm the registration before checking the permit.');return}
   const box=$('permitResult');box.className='permit-result neutral';box.textContent='Checking permit…';
   try{const r=await fetch(`/api/evidence/check?registration=${encodeURIComponent(reg)}`,{cache:'no-store'}),d=await r.json();if(!r.ok)throw new Error(d.error||'Permit check failed');permit=d;const cls=d.valid?(d.key==='expiring'?'due':'valid'):'invalid';box.className=`permit-result ${cls}`;box.innerHTML=`${d.label}<small>${d.detail||''}${d.plateNumber?` Plate ${d.plateNumber}.`:''}</small>`;await drawStamp()}catch(e){permit=null;box.className='permit-result invalid';box.textContent=e.message;updateSubmit()}
 }
-$('checkBtn').addEventListener('click',async()=>{const reg=normaliseReg($('registration').value);if(reg)markSelectedRegistration(reg,'manual');await checkPermit()});
+$('checkBtn').addEventListener('click',async()=>{if(!confirmSelectedRegistration())return;setOcrStatus(`Confirmed ${formatReg(confirmedReg)}. Checking permit…`,'success');await checkPermit()});
 async function reverseGeocode(){
   if(!coords.latitude||!coords.longitude)return;
   const choices=$('locationChoices'),holder=$('locationChoiceButtons');
@@ -372,7 +404,7 @@ function requestGps({automatic=false}={}){
 }
 $('gpsBtn').addEventListener('click',()=>requestGps());
 $('stampBtn').addEventListener('click',drawStamp);$('locationLabel').addEventListener('input',()=>{stampedBlob=null;updateSubmit()});
-function updateSubmit(){$('submitBtn').disabled=!(originalFile&&stampedBlob&&permit&&normaliseReg($('registration').value)&&selectedOcrReg===normaliseReg($('registration').value))}
+function updateSubmit(){$('submitBtn').disabled=!(originalFile&&stampedBlob&&permit&&confirmedReg&&confirmedReg===normaliseReg($('registration').value))}
 $('submitBtn').addEventListener('click',async()=>{const btn=$('submitBtn'),status=$('submitStatus');btn.disabled=true;status.textContent='Saving evidence…';try{await drawStamp();const fd=new FormData();fd.append('original',originalFile,originalFile.name||'original.jpg');fd.append('stamped',stampedBlob,'stamped.jpg');fd.append('registration',normaliseReg($('registration').value));fd.append('observedAt',new Date().toISOString());fd.append('latitude',coords.latitude??'');fd.append('longitude',coords.longitude??'');fd.append('accuracy',coords.accuracy??'');fd.append('locationLabel',$('locationLabel').value);fd.append('notes',$('notes').value);const r=await fetch('/api/evidence/submit',{method:'POST',body:fd}),d=await r.json();if(!r.ok)throw new Error(d.error||'Submission failed');status.textContent=`Saved as ${d.reference}. ${d.message}`;alert(`Evidence saved\n${d.reference}\n${d.permit.label}`)}catch(e){status.textContent=e.message;alert(e.message)}finally{updateSubmit()}});
 window.addEventListener('beforeunload',()=>{if(ocrWorker)ocrWorker.terminate().catch(()=>{})});
 
@@ -571,15 +603,28 @@ async function scanMarkedPlate(){
   catch(e){setOcrStatus(`Marked-plate scan failed: ${e.message}`,'error')}finally{ocrBusy=false;$('scanCropBtn').disabled=plateCorners.length!==4;updateSubmit()}
 }
 function applyBestCandidates(candidates,prefix='Detected'){
-  if(!candidates.length){setOcrStatus('No reliable registration found. Retake closer to the plate, reduce glare, or enter it manually.','warning');return}
-  showOcrChoices(candidates);const best=candidates[0];$('registration').value=formatReg(best.value);markSelectedRegistration(best.value,'automatic');permit=null;stampedBlob=null;
-  $('permitResult').className='permit-result neutral';$('permitResult').textContent='Registration detected — checking permit…';
-  const registerMatched=best.registerResult&&best.registerResult.key!=='not-listed';const alternatives=candidates.slice(1,6).map(x=>formatReg(x.value));
-  const correction=best.ocrSource&&best.ocrSource!==best.value?` Corrected likely OCR confusion from ${formatReg(best.ocrSource)}.`:'';
-  setOcrStatus(`${registerMatched?'Permit-register match':'Best read'}: ${formatReg(best.value)}.${correction}${alternatives.length?` Tap an alternative below if needed.`:''} Always confirm against the image.`,'success');
-  drawStamp().then(checkPermit);
+  candidates=candidates.filter(item=>isCompleteUkRegistration(item.value));
+  if(!candidates.length){setOcrStatus('No reliable complete UK registration found. Retake closer to the plate or enter it manually.','warning');return}
+  showOcrChoices(candidates);
+  const best=candidates[0];
+  const isSpecialist=best.source==='Plate Recognizer';
+  const highConfidence=isSpecialist&&Number.isFinite(best.apiConfidence)&&best.apiConfidence>=95;
+  permit=null;stampedBlob=null;confirmedReg='';
+  $('registration').classList.remove('confirmed');
+  $('permitResult').className='permit-result neutral';
+  $('permitResult').textContent='Confirm the registration to check the permit';
+  if(highConfidence){
+    $('registration').value=formatReg(best.value);
+    markSelectedRegistration(best.value,'automatic');
+    setOcrStatus(`${prefix}: ${formatReg(best.value)} (${best.apiConfidence.toFixed(1)}% confidence). Check the photograph, then press CONFIRM.`,'success');
+  }else{
+    $('registration').value='';
+    clearSelectedRegistration();
+    setOcrStatus(`${prefix} returned possible registrations. Tap the correct option, check it against the photograph, then press CONFIRM.`,'warning');
+  }
+  drawStamp();
 }
-async function recogniseRegistration(){
+async function recogniseRegistrationBrowserFallback(){
   if(!originalImage||ocrBusy)return;ocrBusy=true;$('ocrBtn').disabled=true;setOcrStatus('Running multi-pass plate recognition…');
   try{
     const worker=await getOcrWorker();
@@ -600,10 +645,41 @@ async function recogniseRegistration(){
       else candidates.push({...candidate,votes:(candidate.votes||1)*2,score:(candidate.score||0)+55});
     }
     candidates.sort((a,b)=>(b.votes-a.votes)||(b.score-a.score));
-    candidates=await scoreAgainstPermitRegister(candidates);applyBestCandidates(candidates,'Automatic scan');
+    candidates=await scoreAgainstPermitRegister(candidates);candidates.forEach(item=>item.source='Browser fallback');applyBestCandidates(candidates,'Browser fallback');
     if(!candidates.length){setOcrStatus('No confident plate read. Retake closer to the plate or choose one of the suggested options if shown.','warning')}
   }catch(e){console.error(e);setOcrStatus(`Automatic reading failed: ${e.message}. Retake closer to the plate or enter it manually.`,'error')}
   finally{ocrBusy=false;$('ocrBtn').disabled=false;updateSubmit()}
+}
+
+async function recogniseRegistration(){
+  if(!originalFile||ocrBusy)return;
+  ocrBusy=true;$('ocrBtn').disabled=true;
+  setOcrStatus('Reading number plate with specialist ANPR…');
+  try{
+    const form=new FormData();
+    form.append('upload',originalFile,originalFile.name||'vehicle.jpg');
+    const response=await fetch('/api/evidence/read-plate',{method:'POST',body:form});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok)throw Object.assign(new Error(data.error||'Specialist plate recognition failed.'),{fallbackAllowed:data.fallbackAllowed!==false});
+    let candidates=(Array.isArray(data.candidates)?data.candidates:[]).map(item=>({
+      value:normaliseReg(item.value),
+      score:Number(item.score)||0,
+      votes:4,
+      apiConfidence:Number.isFinite(Number(item.confidence))?Number(item.confidence):null,
+      source:'Plate Recognizer'
+    })).filter(item=>isCompleteUkRegistration(item.value));
+    candidates=[...new Map(candidates.sort((a,b)=>(b.apiConfidence??-1)-(a.apiConfidence??-1)).map(item=>[item.value,item])).values()];
+    if(!candidates.length)throw Object.assign(new Error('No number plate was found by specialist ANPR.'),{fallbackAllowed:true});
+    applyBestCandidates(candidates,'Plate Recognizer');
+  }catch(error){
+    console.warn('Specialist ANPR unavailable; using browser fallback:',error.message);
+    setOcrStatus(`${error.message} Trying on-device fallback…`,'warning');
+    ocrBusy=false;$('ocrBtn').disabled=false;
+    await recogniseRegistrationBrowserFallback();
+    return;
+  }finally{
+    if(ocrBusy){ocrBusy=false;$('ocrBtn').disabled=false;updateSubmit()}
+  }
 }
 
 $('resetCornersBtn').addEventListener('click',resetPlateCorners);

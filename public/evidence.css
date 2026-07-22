@@ -11,3 +11,5 @@
 .reg-row input.confirmed{border:2px solid var(--green);background:rgba(41,199,119,.08);box-shadow:0 0 0 3px rgba(41,199,119,.1)}
 .submit-row{position:sticky;bottom:5px;z-index:10;padding:7px;background:rgba(7,17,31,.94);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:12px}
 @media(max-width:560px){.ocr-choice-buttons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.ocr-choice-buttons button{width:100%;padding:8px 7px;font-size:17px}.selected-reg-summary{font-size:13px}.selected-reg-summary strong{font-size:17px}.permit-result{font-size:19px}.submit-row{bottom:4px}}
+
+.choice-reg{display:block}.choice-source{display:block;margin-top:3px;font-size:10px;letter-spacing:.04em;color:#b8c8da;font-weight:750}.ocr-choice-buttons button.selected .choice-source{color:#dfffee}

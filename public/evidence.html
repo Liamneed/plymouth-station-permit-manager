@@ -33,10 +33,10 @@
       <p id="photoHelp" class="help">No photograph selected.</p>
     </div>
 
-    <div id="ocrStatus" class="ocr-status neutral">Take a photo and the app will read the plate, request GPS and check the permit automatically.</div>
+    <div id="ocrStatus" class="ocr-status neutral">Take a photo and specialist ANPR will read the plate, request GPS and check the permit automatically. Browser OCR is used only as a fallback.</div>
 
     <div id="ocrChoices" class="ocr-choices" hidden>
-      <p>Best match is selected. Tap another registration to change it:</p>
+      <p>Tap the correct registration, check it against the photograph, then press CONFIRM:</p>
       <div id="ocrChoiceButtons" class="ocr-choice-buttons"></div>
       <div id="selectedRegSummary" class="selected-reg-summary" hidden aria-live="polite"></div>
     </div>
@@ -45,7 +45,7 @@
       <input id="registration" maxlength="10" autocomplete="off" autocapitalize="characters" placeholder="AB12 CDE" aria-label="Vehicle registration">
       <button id="checkBtn" type="button">CONFIRM</button>
     </div>
-    <div id="permitResult" class="permit-result neutral">Permit not checked</div>
+    <div id="permitResult" class="permit-result neutral">Confirm the registration to check the permit</div>
 
     <div class="location-strip">
       <div class="location-main">

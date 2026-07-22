@@ -164,3 +164,15 @@ The evidence page now includes multi-pass OCR voting, UK-format-aware character 
 ## Reliable number-plate recognition update
 
 The evidence page now scans the untouched original photograph before any evidence overlay is drawn. It automatically finds bright UK plate-shaped regions, crops and enlarges them, runs several OCR preprocessing passes, corrects common letter/number confusions, validates UK registration formats and ranks matches against the Plymouth permit register. Difficult photographs can still use the four-corner Angle / Crop Assist. A human must confirm the registration before evidence is submitted.
+
+## Specialist ANPR (Plate Recognizer)
+
+The mobile evidence page uses Plate Recognizer Snapshot Cloud as the primary number-plate reader. The API token is used only by the Node server and is never sent to the browser. Add these runtime variables locally and in Coolify:
+
+```env
+PLATE_RECOGNIZER_TOKEN=your_snapshot_cloud_api_token
+PLATE_RECOGNIZER_REGIONS=uk
+PLATE_RECOGNIZER_TIMEOUT_MS=30000
+```
+
+When Snapshot Cloud is unavailable, times out, has no remaining calls or finds no plate, the existing browser OCR runs as a fallback. Every result still requires the user to visually confirm the registration before evidence can be submitted.

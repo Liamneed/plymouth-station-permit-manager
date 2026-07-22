@@ -1,7 +1,7 @@
 // server.js
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
+import fetch, { Blob, FormData } from "node-fetch";
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
@@ -38,6 +38,11 @@ const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() ===
 const SMTP_USER = String(process.env.SMTP_USER || "").trim();
 const SMTP_PASS = String(process.env.SMTP_PASS || "");
 const SMTP_FROM = String(process.env.SMTP_FROM || SMTP_USER || "").trim();
+const PLATE_RECOGNIZER_TOKEN = String(process.env.PLATE_RECOGNIZER_TOKEN || "").trim();
+const PLATE_RECOGNIZER_URL = String(process.env.PLATE_RECOGNIZER_URL || "https://api.platerecognizer.com/v1/plate-reader/").trim();
+const PLATE_RECOGNIZER_REGIONS = String(process.env.PLATE_RECOGNIZER_REGIONS || "uk")
+  .split(",").map(value => value.trim()).filter(Boolean);
+const PLATE_RECOGNIZER_TIMEOUT_MS = Math.max(5000, Number(process.env.PLATE_RECOGNIZER_TIMEOUT_MS || 30000));
 fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 
 
@@ -1369,6 +1374,104 @@ function evidencePermitResult(record, registration) {
 }
 
 app.get("/evidence", (_req, res) => res.sendFile(path.join(__dirname, "public", "evidence.html")));
+
+const anprUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    if (!/^image\/(jpeg|png|webp)$/i.test(file.mimetype)) {
+      return cb(Object.assign(new Error("Only JPEG, PNG or WebP photographs are accepted."), { status: 400 }));
+    }
+    cb(null, true);
+  },
+});
+
+app.get("/api/evidence/anpr-status", (_req, res) => {
+  res.json({
+    configured: Boolean(PLATE_RECOGNIZER_TOKEN),
+    provider: "Plate Recognizer Snapshot Cloud",
+    regions: PLATE_RECOGNIZER_REGIONS,
+  });
+});
+
+app.post("/api/evidence/read-plate", anprUpload.single("upload"), async (req, res) => {
+  if (!PLATE_RECOGNIZER_TOKEN) {
+    return res.status(503).json({
+      error: "Plate Recognizer is not configured.",
+      code: "ANPR_NOT_CONFIGURED",
+      fallbackAllowed: true,
+    });
+  }
+  if (!req.file) return res.status(400).json({ error: "Choose or take a photograph first." });
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PLATE_RECOGNIZER_TIMEOUT_MS);
+  try {
+    const form = new FormData();
+    form.append("upload", new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname || "vehicle.jpg");
+    for (const region of PLATE_RECOGNIZER_REGIONS) form.append("regions", region);
+
+    const response = await fetch(PLATE_RECOGNIZER_URL, {
+      method: "POST",
+      headers: { Authorization: `Token ${PLATE_RECOGNIZER_TOKEN}` },
+      body: form,
+      signal: controller.signal,
+    });
+
+    let data = null;
+    try { data = await response.json(); } catch { data = null; }
+    if (!response.ok) {
+      const providerMessage = data?.detail || data?.message || data?.error || `Plate Recognizer returned HTTP ${response.status}.`;
+      const status = response.status === 429 ? 429 : response.status === 401 || response.status === 403 ? 502 : 502;
+      return res.status(status).json({
+        error: String(providerMessage),
+        code: response.status === 429 ? "ANPR_LIMIT_REACHED" : "ANPR_PROVIDER_ERROR",
+        providerStatus: response.status,
+        fallbackAllowed: true,
+      });
+    }
+
+    const byPlate = new Map();
+    for (const result of Array.isArray(data?.results) ? data.results : []) {
+      const rows = [
+        { plate: result?.plate, score: result?.score },
+        ...(Array.isArray(result?.candidates) ? result.candidates : []),
+      ];
+      for (const row of rows) {
+        const plate = normalizeRegistration(row?.plate);
+        const score = Number(row?.score);
+        if (!plate || plate.length < 4 || plate.length > 10) continue;
+        const current = byPlate.get(plate);
+        if (!current || (Number.isFinite(score) ? score : 0) > current.score) {
+          byPlate.set(plate, {
+            value: plate,
+            score: Number.isFinite(score) ? score : 0,
+            confidence: Number.isFinite(score) ? Math.round(score * 1000) / 10 : null,
+          });
+        }
+      }
+    }
+    const candidates = [...byPlate.values()].sort((a, b) => b.score - a.score).slice(0, 10);
+    res.json({
+      ok: true,
+      provider: "Plate Recognizer Snapshot Cloud",
+      candidates,
+      processingTime: data?.processing_time ?? null,
+      usage: data?.usage ?? null,
+      found: candidates.length > 0,
+    });
+  } catch (error) {
+    const timedOut = error?.name === "AbortError";
+    console.error("Plate Recognizer request failed:", timedOut ? "timeout" : error.message);
+    res.status(502).json({
+      error: timedOut ? "Plate recognition timed out. Browser OCR fallback will be used." : "Plate recognition service is temporarily unavailable.",
+      code: timedOut ? "ANPR_TIMEOUT" : "ANPR_UNAVAILABLE",
+      fallbackAllowed: true,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+});
 
 app.get("/api/evidence/check", async (req, res) => {
   try {
