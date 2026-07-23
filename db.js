@@ -161,6 +161,23 @@ export async function initDatabase() {
       UNIQUE(permit_id, alert_days, recipient)
     );
 
+    ALTER TABLE operators ADD COLUMN IF NOT EXISTS integration_type text NOT NULL DEFAULT 'manual';
+    ALTER TABLE operators ADD COLUMN IF NOT EXISTS external_company_id text;
+    ALTER TABLE operators ADD COLUMN IF NOT EXISTS contact_name text;
+    ALTER TABLE operators ADD COLUMN IF NOT EXISTS contact_email text;
+    ALTER TABLE operators ADD COLUMN IF NOT EXISTS contact_phone text;
+
+    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS integration_provider text;
+    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS external_vehicle_id text;
+    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS sync_status text NOT NULL DEFAULT 'not_synced';
+    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS sync_message text;
+    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_external_check_at timestamptz;
+    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_external_sync_at timestamptz;
+    ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS external_snapshot jsonb;
+
+    CREATE INDEX IF NOT EXISTS idx_vehicles_external_vehicle
+      ON vehicles(integration_provider, external_vehicle_id);
+
     CREATE TABLE IF NOT EXISTS evidence_records (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       reference text NOT NULL UNIQUE,
@@ -979,5 +996,72 @@ export async function notificationHistory(limit = 200) {
     ]
   );
 
+  return rows;
+}
+
+
+export async function updateVehicleSyncState(registration, state = {}, context = {}) {
+  if (!pool) throw new Error('Database is not configured.');
+  const reg = normaliseReg(registration);
+  if (!reg) throw new Error('Registration is required.');
+
+  const before = await getPermitByRegistration(reg);
+  if (!before) throw new Error('Vehicle not found.');
+
+  const { rows } = await pool.query(
+    `UPDATE vehicles
+       SET integration_provider = COALESCE($2, integration_provider),
+           external_vehicle_id = COALESCE($3, external_vehicle_id),
+           sync_status = COALESCE($4, sync_status),
+           sync_message = $5,
+           last_external_check_at = CASE WHEN $6::boolean THEN now() ELSE last_external_check_at END,
+           last_external_sync_at = CASE WHEN $7::boolean THEN now() ELSE last_external_sync_at END,
+           external_snapshot = COALESCE($8::jsonb, external_snapshot),
+           updated_at = now()
+     WHERE registration = $1
+     RETURNING *`,
+    [
+      reg,
+      state.provider || null,
+      state.externalVehicleId ? String(state.externalVehicleId) : null,
+      state.status || null,
+      state.message ?? null,
+      Boolean(state.checked),
+      Boolean(state.synced),
+      state.snapshot ? JSON.stringify(state.snapshot) : null,
+    ]
+  );
+
+  const after = await getPermitByRegistration(reg);
+  await pool.query(
+    `INSERT INTO audit_logs(actor,action,entity_type,entity_id,registration,before_data,after_data,ip_address,user_agent,request_id)
+     VALUES($1,$2,'vehicle_sync',$3,$4,$5,$6,$7,$8,$9)`,
+    [
+      context.actor || 'system',
+      state.action || 'vehicle.sync_state_changed',
+      rows[0]?.id || before.id,
+      reg,
+      before,
+      after,
+      context.ip || null,
+      context.userAgent || null,
+      context.requestId || null,
+    ]
+  );
+  return after;
+}
+
+export async function listIntegrationOperators() {
+  if (!pool) return [];
+  const { rows } = await pool.query(
+    `SELECT o.*,
+            count(v.id)::int AS vehicle_count,
+            count(v.id) FILTER (WHERE v.sync_status='synced')::int AS synced_count,
+            count(v.id) FILTER (WHERE v.sync_status IN ('failed','mismatch','pending'))::int AS attention_count
+       FROM operators o
+       LEFT JOIN vehicles v ON v.operator_id=o.id
+      GROUP BY o.id
+      ORDER BY o.name`
+  );
   return rows;
 }

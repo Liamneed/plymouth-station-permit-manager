@@ -14,7 +14,8 @@ import {
   databaseEnabled, initDatabase, dbStatus, listPermits as dbListPermits,
   getPermitByRegistration as dbGetPermit, upsertPermitRecord, writeSystemLog,
   listLogs, createApiKey, authenticateApiKey, seedFromJson,
-  duePermitAlerts, recordPermitNotification, notificationHistory
+  duePermitAlerts, recordPermitNotification, notificationHistory,
+  updateVehicleSyncState, listIntegrationOperators
 } from "./db.js";
 
 dotenv.config();
@@ -1720,6 +1721,219 @@ app.post("/api/evidence/submit", evidenceUpload.fields([{ name: "original", maxC
 });
 
 
+
+// ---------- Autocab reconciliation and two-way permit synchronisation ----------
+const autocabReconcileSessions = new Map();
+const AUTOCAB_RECONCILE_TTL_MS = 30 * 60 * 1000;
+
+function cleanupAutocabReconcileSessions() {
+  const now = Date.now();
+  for (const [id, session] of autocabReconcileSessions) {
+    if (session.expiresAt <= now) autocabReconcileSessions.delete(id);
+  }
+}
+setInterval(cleanupAutocabReconcileSessions, 5 * 60 * 1000).unref();
+
+function autocabVehicleId(vehicle) {
+  return vehicle?.id ?? vehicle?.vehicleId ?? vehicle?.vehicleID ?? null;
+}
+
+function autocabRegistration(vehicle) {
+  return normalizeRegistration(vehicle?.registration ?? vehicle?.registrationNumber ?? '');
+}
+
+function autocabPlate(vehicle) {
+  // In this Autocab account the licensed plate is often held in name.
+  return String(vehicle?.name ?? vehicle?.plateNumber ?? vehicle?.plate ?? '').trim();
+}
+
+function compactAutocabSnapshot(vehicle) {
+  return {
+    id: autocabVehicleId(vehicle),
+    registration: vehicle?.registration ?? null,
+    plateNumber: autocabPlate(vehicle) || null,
+    callsign: vehicle?.callsign ?? vehicle?.callSign ?? null,
+    motExpiryDate: dateKey(vehicle?.motExpiryDate),
+    isActive: vehicle?.isActive ?? null,
+    isSuspended: vehicle?.isSuspended ?? null,
+    companyId: vehicle?.companyId ?? null,
+  };
+}
+
+async function loadAutocabVehicleDetails() {
+  const list = extractVehicleList(
+    await autocabRequest('https://autocab-api.azure-api.net/vehicle/v1/vehicles')
+  );
+  return mapWithConcurrency(list, PERMIT_DETAIL_CONCURRENCY, async summary => {
+    const id = autocabVehicleId(summary);
+    if (id === null || id === undefined || id === '') return summary;
+    try {
+      const detail = await autocabRequest(
+        `https://autocab-api.azure-api.net/vehicle/v1/vehicles/${encodeURIComponent(id)}`
+      );
+      return { ...summary, ...detail };
+    } catch (error) {
+      return { ...summary, _detailError: error.message };
+    }
+  });
+}
+
+async function findAutocabVehicleForPermit(record) {
+  if (record.external_vehicle_id) {
+    try {
+      return await autocabRequest(
+        `https://autocab-api.azure-api.net/vehicle/v1/vehicles/${encodeURIComponent(record.external_vehicle_id)}`
+      );
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+  const all = await loadAutocabVehicleDetails();
+  const reg = normalizeRegistration(record.registration);
+  return all.find(vehicle => autocabRegistration(vehicle) === reg) || null;
+}
+
+async function writePermitExpiryToAutocab(record, requestedExpiry) {
+  const requested = dateKey(requestedExpiry);
+  if (!requested) throw new Error('A valid permit expiry date is required.');
+
+  const current = await findAutocabVehicleForPermit(record);
+  if (!current) throw new Error('Vehicle was not found in Autocab.');
+
+  const currentReg = autocabRegistration(current);
+  const dbReg = normalizeRegistration(record.registration);
+  if (currentReg !== dbReg) throw new Error('Autocab registration does not match the permit record.');
+
+  const dbPlate = normalizePlate(record.plate_number || record.permit_number || '');
+  const currentPlate = normalizePlate(autocabPlate(current));
+  if (dbPlate && currentPlate && dbPlate !== currentPlate) {
+    throw new Error(`Plate mismatch: database ${record.plate_number || record.permit_number}, Autocab ${autocabPlate(current)}.`);
+  }
+
+  const previous = dateKey(current.motExpiryDate);
+  if (previous !== requested) {
+    const url = `https://autocab-api.azure-api.net/vehicle/v1/vehicles/${encodeURIComponent(autocabVehicleId(current))}`;
+    const updatedVehicle = {
+      ...current,
+      motExpiryDate: toAutocabDate(parsePermitDate(requested)),
+    };
+    delete updatedVehicle._detailError;
+    await autocabRequest(url, { method: 'PUT', body: JSON.stringify(updatedVehicle) });
+    permitDetailCache.delete(String(autocabVehicleId(current)));
+    const verified = await autocabRequest(url);
+    const verifiedExpiry = dateKey(verified.motExpiryDate);
+    if (verifiedExpiry !== requested) {
+      throw new Error(`Autocab verification failed. Returned ${verifiedExpiry || 'no date'}.`);
+    }
+    return { current: verified, previous, verifiedExpiry, changed: true };
+  }
+  return { current, previous, verifiedExpiry: previous, changed: false };
+}
+
+async function buildAutocabReconciliation() {
+  const [databaseRecords, autocabVehicles] = await Promise.all([
+    dbListPermits({ limit: 1000 }),
+    loadAutocabVehicleDetails(),
+  ]);
+
+  const dbByReg = new Map(databaseRecords.map(row => [normalizeRegistration(row.registration), row]));
+  const autocabByReg = new Map();
+  for (const vehicle of autocabVehicles) {
+    const reg = autocabRegistration(vehicle);
+    if (reg && !autocabByReg.has(reg)) autocabByReg.set(reg, vehicle);
+  }
+
+  const rows = [];
+  const registrations = new Set([...dbByReg.keys(), ...autocabByReg.keys()]);
+  for (const registration of registrations) {
+    const db = dbByReg.get(registration) || null;
+    const ac = autocabByReg.get(registration) || null;
+    const isRankVehicle = ac ? isNeedACabRankVehicle(ac) : false;
+
+    // Ignore unrelated Autocab-only private-hire records. All database records remain visible.
+    if (!db && !isRankVehicle) continue;
+
+    const dbPlateRaw = db?.plate_number || db?.permit_number || '';
+    const acPlateRaw = ac ? autocabPlate(ac) : '';
+    const dbPlate = normalizePlate(dbPlateRaw);
+    const acPlate = normalizePlate(acPlateRaw);
+    const plateMatch = !dbPlate || !acPlate || dbPlate === acPlate;
+    const dbExpiry = dateKey(db?.expires_on);
+    const autocabExpiry = dateKey(ac?.motExpiryDate);
+
+    let status = 'synced';
+    let recommendedAction = 'none';
+    let message = 'Database and Autocab agree.';
+
+    if (!db && ac) {
+      status = 'autocab_only';
+      recommendedAction = 'import_autocab';
+      message = 'Rank vehicle exists in Autocab but not in the permit database.';
+    } else if (db && !ac) {
+      status = 'database_only';
+      message = 'Permit exists in the database but no matching Autocab vehicle was found.';
+    } else if (ac?._detailError) {
+      status = 'error';
+      message = `Autocab detail error: ${ac._detailError}`;
+    } else if (!plateMatch) {
+      status = 'plate_mismatch';
+      message = 'Registration matches but plate numbers differ. Manual review is required.';
+    } else if (!dbExpiry && autocabExpiry) {
+      status = 'database_missing_expiry';
+      recommendedAction = 'autocab_to_database';
+      message = 'Import the confirmed Autocab expiry into the permit database.';
+    } else if (dbExpiry && !autocabExpiry) {
+      status = 'autocab_missing_expiry';
+      recommendedAction = 'database_to_autocab';
+      message = 'Send the permit-manager expiry to Autocab.';
+    } else if (dbExpiry !== autocabExpiry) {
+      status = 'expiry_mismatch';
+      recommendedAction = 'review';
+      message = 'Expiry dates differ. Select which system contains the correct date.';
+    } else if (!dbExpiry && !autocabExpiry) {
+      status = 'missing_expiry';
+      message = 'Neither system has an expiry date.';
+    }
+
+    rows.push({
+      registration,
+      displayRegistration: db?.display_registration || (registration.length === 7 ? `${registration.slice(0,4)} ${registration.slice(4)}` : registration),
+      database: db ? {
+        plateNumber: db.plate_number,
+        permitNumber: db.permit_number,
+        expiryDate: dbExpiry,
+        operator: db.operator_name,
+        callsign: db.callsign,
+        syncStatus: db.sync_status,
+        externalVehicleId: db.external_vehicle_id,
+      } : null,
+      autocab: ac ? compactAutocabSnapshot(ac) : null,
+      isRankVehicle,
+      plateMatch,
+      status,
+      recommendedAction,
+      message,
+    });
+  }
+
+  rows.sort((a, b) => a.registration.localeCompare(b.registration));
+  const summary = rows.reduce((acc, row) => {
+    acc.total += 1;
+    acc[row.status] = (acc[row.status] || 0) + 1;
+    if (row.recommendedAction !== 'none' && row.recommendedAction !== 'review') acc.actionable += 1;
+    return acc;
+  }, { total: 0, actionable: 0 });
+
+  const sessionId = crypto.randomUUID();
+  autocabReconcileSessions.set(sessionId, {
+    createdAt: Date.now(),
+    expiresAt: Date.now() + AUTOCAB_RECONCILE_TTL_MS,
+    rows,
+    autocabVehicles,
+  });
+  return { sessionId, summary, rows, generatedAt: new Date().toISOString() };
+}
+
 // ---------- PostgreSQL permit database, API and complete logs ----------
 function dbContext(req) {
   return { actor: "admin", ip: req.ip, userAgent: req.get("user-agent"), requestId: req.requestId };
@@ -1744,6 +1958,88 @@ app.get("/logs", requireAdmin, (_req, res) => res.sendFile(path.join(__dirname, 
 app.get("/api/database/status", requireAdmin, async (_req, res) => {
   try { res.json(await dbStatus()); } catch (error) { res.status(503).json({ enabled: databaseEnabled, connected: false, error: error.message }); }
 });
+app.get("/api/database/integrations/operators", requireAdmin, requireDatabase, async (_req, res) => {
+  try { res.json({ records: await listIntegrationOperators() }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get("/api/database/autocab/reconcile", requireAdmin, requireDatabase, async (_req, res) => {
+  try { res.json(await buildAutocabReconciliation()); }
+  catch (error) { res.status(error.status || 500).json({ error: error.message }); }
+});
+
+app.post("/api/database/autocab/reconcile/apply", requireAdmin, requireCsrf, requireDatabase, async (req, res) => {
+  const session = autocabReconcileSessions.get(String(req.body.sessionId || ''));
+  if (!session || session.expiresAt <= Date.now()) return res.status(410).json({ error: 'Reconciliation preview expired. Run a new preview.' });
+
+  const requestedRows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const previewByReg = new Map(session.rows.map(row => [row.registration, row]));
+  const results = [];
+
+  for (const requestRow of requestedRows) {
+    const registration = normalizeRegistration(requestRow.registration);
+    const action = String(requestRow.action || 'none');
+    const preview = previewByReg.get(registration);
+    if (!preview || action === 'none' || action === 'review') continue;
+
+    try {
+      if (!preview.plateMatch) throw new Error('Plate mismatch must be resolved before synchronising.');
+      const context = { ...dbContext(req), actor: 'admin:autocab-reconcile' };
+
+      if (action === 'autocab_to_database' || action === 'import_autocab') {
+        if (!preview.autocab) throw new Error('Autocab vehicle is unavailable.');
+        const expiry = preview.autocab.motExpiryDate;
+        if (!expiry) throw new Error('Autocab has no permit expiry date to import.');
+        const saved = await upsertPermitRecord({
+          registration,
+          plateNumber: preview.autocab.plateNumber || preview.database?.plateNumber || null,
+          permitNumber: preview.autocab.plateNumber || preview.database?.permitNumber || null,
+          operator: 'Need-A-Cab',
+          callsign: preview.autocab.callsign || null,
+          expiresOn: expiry,
+          needACab: true,
+          source: 'autocab-sync',
+        }, context);
+        await updateVehicleSyncState(registration, {
+          provider: 'autocab', externalVehicleId: preview.autocab.id, status: 'synced',
+          message: 'Permit details imported and verified from Autocab.', checked: true, synced: true,
+          snapshot: preview.autocab, action: 'autocab.imported_to_database'
+        }, context);
+        results.push({ registration, action, ok: true, expiryDate: dateKey(saved.expires_on) });
+      } else if (action === 'database_to_autocab') {
+        const dbRecord = await dbGetPermit(registration);
+        if (!dbRecord?.expires_on) throw new Error('The permit database has no expiry date to send.');
+        const sync = await writePermitExpiryToAutocab(dbRecord, dbRecord.expires_on);
+        await updateVehicleSyncState(registration, {
+          provider: 'autocab', externalVehicleId: autocabVehicleId(sync.current), status: 'synced',
+          message: sync.changed ? 'Permit expiry sent to and verified in Autocab.' : 'Autocab expiry verified as current.',
+          checked: true, synced: true, snapshot: compactAutocabSnapshot(sync.current),
+          action: sync.changed ? 'autocab.expiry_updated' : 'autocab.expiry_verified'
+        }, context);
+        results.push({ registration, action, ok: true, expiryDate: sync.verifiedExpiry });
+      } else {
+        throw new Error(`Unsupported reconciliation action: ${action}`);
+      }
+    } catch (error) {
+      try {
+        if (preview.database) await updateVehicleSyncState(registration, {
+          provider: 'autocab', externalVehicleId: preview.autocab?.id, status: 'failed',
+          message: error.message, checked: true, action: 'autocab.reconcile_failed'
+        }, { ...dbContext(req), actor: 'admin:autocab-reconcile' });
+      } catch {}
+      results.push({ registration, action, ok: false, error: error.message });
+    }
+  }
+
+  autocabReconcileSessions.delete(String(req.body.sessionId || ''));
+  res.json({
+    ok: results.every(row => row.ok),
+    updated: results.filter(row => row.ok).length,
+    failed: results.filter(row => !row.ok).length,
+    results,
+  });
+});
+
 app.get("/api/database/permits", requireAdmin, requireDatabase, async (req, res) => {
   try { res.json({ records: await dbListPermits(req.query), generatedAt: new Date().toISOString() }); }
   catch (error) { res.status(500).json({ error: error.message }); }
@@ -1754,8 +2050,43 @@ app.get("/api/database/permits/:registration", requireAdmin, requireDatabase, as
   res.json(record);
 });
 app.post("/api/database/permits", requireAdmin, requireCsrf, requireDatabase, async (req, res) => {
-  try { res.json({ ok: true, record: await upsertPermitRecord(req.body, dbContext(req)) }); }
-  catch (error) { res.status(400).json({ error: error.message }); }
+  try {
+    const context = dbContext(req);
+    const existing = await dbGetPermit(req.body.registration);
+    let syncResult = null;
+
+    if (req.body.syncAutocab) {
+      const candidate = existing || {
+        registration: req.body.registration,
+        plate_number: req.body.plateNumber,
+        permit_number: req.body.permitNumber,
+        external_vehicle_id: req.body.externalVehicleId,
+      };
+      syncResult = await writePermitExpiryToAutocab(candidate, req.body.expiresOn);
+    }
+
+    const record = await upsertPermitRecord(req.body, context);
+    if (syncResult) {
+      await updateVehicleSyncState(record.registration, {
+        provider: 'autocab',
+        externalVehicleId: autocabVehicleId(syncResult.current),
+        status: 'synced',
+        message: syncResult.changed ? 'Permit expiry updated and verified in Autocab.' : 'Autocab already contained this expiry date.',
+        checked: true,
+        synced: true,
+        snapshot: compactAutocabSnapshot(syncResult.current),
+        action: syncResult.changed ? 'autocab.expiry_updated' : 'autocab.expiry_verified',
+      }, context);
+    }
+    res.json({ ok: true, record: await dbGetPermit(record.registration), syncResult: syncResult ? { changed: syncResult.changed, verifiedExpiry: syncResult.verifiedExpiry } : null });
+  } catch (error) {
+    try {
+      if (req.body?.registration) await updateVehicleSyncState(req.body.registration, {
+        provider: 'autocab', status: 'failed', message: error.message, checked: true, action: 'autocab.sync_failed'
+      }, dbContext(req));
+    } catch {}
+    res.status(400).json({ error: error.message });
+  }
 });
 app.put("/api/database/permits/:registration", requireAdmin, requireCsrf, requireDatabase, async (req, res) => {
   try { res.json({ ok: true, record: await upsertPermitRecord({ ...req.body, registration: req.params.registration }, dbContext(req)) }); }
