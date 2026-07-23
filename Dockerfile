@@ -12,7 +12,7 @@ ENV NPM_CONFIG_FETCH_RETRY_FACTOR=2
 ENV NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=20000
 ENV NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
 
-COPY package.json package-lock.json ./
+COPY package.json ./
 
 RUN npm config set registry https://registry.npmjs.org/ \
     && npm install --omit=dev --no-audit --no-fund \

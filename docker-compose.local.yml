@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: permit_manager
+      POSTGRES_USER: permit_manager
+      POSTGRES_PASSWORD: permit_manager_local
+    ports:
+      - "5433:5432"
+    volumes:
+      - permit_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U permit_manager -d permit_manager"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+volumes:
+  permit_postgres_data:

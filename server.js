@@ -10,6 +10,12 @@ import multer from "multer";
 import XLSX from "xlsx";
 import nodemailer from "nodemailer";
 import { fileURLToPath } from "url";
+import {
+  databaseEnabled, initDatabase, dbStatus, listPermits as dbListPermits,
+  getPermitByRegistration as dbGetPermit, upsertPermitRecord, writeSystemLog,
+  listLogs, createApiKey, authenticateApiKey, seedFromJson,
+  duePermitAlerts, recordPermitNotification, notificationHistory
+} from "./db.js";
 
 dotenv.config();
 
@@ -18,6 +24,9 @@ const __dirname  = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const DATABASE_REQUIRED = String(process.env.DATABASE_REQUIRED || "false").toLowerCase() === "true";
+let databaseReady = false;
+let databaseError = null;
 
 const AUTOCAB_KEY    = process.env.AUTOCAB_KEY || "";
 const WEBHOOK_TOKEN  = process.env.WEBHOOK_TOKEN || "";
@@ -38,6 +47,10 @@ const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() ===
 const SMTP_USER = String(process.env.SMTP_USER || "").trim();
 const SMTP_PASS = String(process.env.SMTP_PASS || "");
 const SMTP_FROM = String(process.env.SMTP_FROM || SMTP_USER || "").trim();
+const PERMIT_ALERT_EMAIL = String(process.env.PERMIT_ALERT_EMAIL || EVIDENCE_EMAIL || "").trim();
+const PERMIT_ALERT_DAYS = String(process.env.PERMIT_ALERT_DAYS || "30,14,7,1,0").split(",").map(Number).filter(Number.isFinite);
+const PERMIT_ALERT_HOUR = Math.min(23, Math.max(0, Number(process.env.PERMIT_ALERT_HOUR || 8)));
+const PERMIT_ALERT_TIMEZONE = String(process.env.PERMIT_ALERT_TIMEZONE || "Europe/London");
 const PLATE_RECOGNIZER_TOKEN = String(process.env.PLATE_RECOGNIZER_TOKEN || "").trim();
 const PLATE_RECOGNIZER_URL = String(process.env.PLATE_RECOGNIZER_URL || "https://api.platerecognizer.com/v1/plate-reader/").trim();
 const PLATE_RECOGNIZER_REGIONS = String(process.env.PLATE_RECOGNIZER_REGIONS || "uk")
@@ -108,6 +121,29 @@ app.use((req, res, next) => {
 app.use(cors({ origin: false }));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+app.use((req, res, next) => {
+  const requestId = crypto.randomUUID();
+  const started = Date.now();
+  req.requestId = requestId;
+  res.setHeader("X-Request-ID", requestId);
+  res.on("finish", () => {
+    if (!databaseReady) return;
+    writeSystemLog({
+      level: res.statusCode >= 500 ? "error" : res.statusCode >= 400 ? "warn" : "info",
+      category: "http",
+      message: `${req.method} ${req.originalUrl}`,
+      method: req.method,
+      path: req.originalUrl,
+      statusCode: res.statusCode,
+      durationMs: Date.now() - started,
+      ip: req.ip,
+      userAgent: req.get("user-agent"),
+      requestId,
+    });
+  });
+  next();
+});
 
 app.use((req, _res, next) => {
   if (req.path.toLowerCase().includes("status") ||
@@ -1477,6 +1513,24 @@ app.get("/api/evidence/check", async (req, res) => {
   try {
     const registration = normalizeRegistration(req.query.registration || req.query.reg || "");
     if (!registration) return res.status(400).json({ error: "Enter a vehicle registration." });
+    if (databaseReady) {
+      const record = await dbGetPermit(registration);
+      if (record) {
+        return res.json({
+          registration,
+          found: true,
+          valid: record.permitStatus.key === "valid" || record.permitStatus.key === "due",
+          status: record.permitStatus.key,
+          statusLabel: record.permitStatus.label,
+          plateNumber: record.plate_number,
+          operator: record.operator_name,
+          permitExpiryDate: record.expires_on,
+          daysRemaining: record.permitStatus.daysRemaining,
+          source: "postgresql",
+          checkedAt: new Date().toISOString(),
+        });
+      }
+    }
     const data = await getPlymouthRegisterWithComparison();
     const record = data.records.find(row => normalizeRegistration(row.registration) === registration);
     res.json({
@@ -1484,6 +1538,7 @@ app.get("/api/evidence/check", async (req, res) => {
       checkedAt: new Date().toISOString(),
       registerUpdatedAt: data.updatedAt,
       sourceFile: data.sourceFile,
+      source: "json-fallback",
     });
   } catch (error) {
     res.status(error.status || 500).json({ error: error.message || "Permit check failed." });
@@ -1664,6 +1719,96 @@ app.post("/api/evidence/submit", evidenceUpload.fields([{ name: "original", maxC
   }
 });
 
+
+// ---------- PostgreSQL permit database, API and complete logs ----------
+function dbContext(req) {
+  return { actor: "admin", ip: req.ip, userAgent: req.get("user-agent"), requestId: req.requestId };
+}
+function requireDatabase(_req, res, next) {
+  if (!databaseReady) return res.status(503).json({ error: databaseError || "Permit database is not available." });
+  next();
+}
+function requirePermitApi(scope = "permit:read") {
+  return async (req, res, next) => {
+    const raw = String(req.get("authorization") || "");
+    const token = raw.replace(/^Bearer\s+/i, "").trim() || String(req.get("x-api-key") || "").trim();
+    const key = await authenticateApiKey(token, scope);
+    if (!key) return res.status(401).json({ error: "A valid API key with the required scope is required." });
+    req.apiKey = key;
+    next();
+  };
+}
+
+app.get("/database", requireAdmin, (_req, res) => res.sendFile(path.join(__dirname, "public", "database.html")));
+app.get("/logs", requireAdmin, (_req, res) => res.sendFile(path.join(__dirname, "public", "database.html")));
+app.get("/api/database/status", requireAdmin, async (_req, res) => {
+  try { res.json(await dbStatus()); } catch (error) { res.status(503).json({ enabled: databaseEnabled, connected: false, error: error.message }); }
+});
+app.get("/api/database/permits", requireAdmin, requireDatabase, async (req, res) => {
+  try { res.json({ records: await dbListPermits(req.query), generatedAt: new Date().toISOString() }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.get("/api/database/permits/:registration", requireAdmin, requireDatabase, async (req, res) => {
+  const record = await dbGetPermit(req.params.registration);
+  if (!record) return res.status(404).json({ error: "Vehicle not found." });
+  res.json(record);
+});
+app.post("/api/database/permits", requireAdmin, requireCsrf, requireDatabase, async (req, res) => {
+  try { res.json({ ok: true, record: await upsertPermitRecord(req.body, dbContext(req)) }); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.put("/api/database/permits/:registration", requireAdmin, requireCsrf, requireDatabase, async (req, res) => {
+  try { res.json({ ok: true, record: await upsertPermitRecord({ ...req.body, registration: req.params.registration }, dbContext(req)) }); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.get("/api/database/logs", requireAdmin, requireDatabase, async (req, res) => {
+  try { res.json({ records: await listLogs(req.query) }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.get("/api/database/notifications", requireAdmin, requireDatabase, async (req,res) => {
+  try { res.json({ records: await notificationHistory(req.query.limit) }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post("/api/database/run-alerts", requireAdmin, requireCsrf, requireDatabase, async (req,res) => {
+  try { res.json(await runPermitAlerts(true)); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post("/api/database/api-keys", requireAdmin, requireCsrf, requireDatabase, async (req, res) => {
+  try {
+    const scopes = Array.isArray(req.body.scopes) ? req.body.scopes : ["permit:read"];
+    const key = await createApiKey(String(req.body.name || "Integration"), scopes, req.body.expiresAt || null);
+    await writeSystemLog({ category: "security", level: "warn", message: `API key created: ${key.name}`, requestId: req.requestId, ip: req.ip });
+    res.json({ ok: true, ...key, warning: "Copy this token now. It cannot be shown again." });
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+app.get("/api/public/v1/permits/:registration", requireDatabase, async (req, res) => {
+  const record = await dbGetPermit(req.params.registration);
+  if (!record) return res.status(404).json({ found: false, registration: normalizeRegistration(req.params.registration) });
+  res.json({
+    found: true,
+    registration: record.display_registration,
+    plateNumber: record.plate_number,
+    permitStatus: record.permitStatus.key,
+    permitStatusLabel: record.permitStatus.label,
+    permitExpiryDate: record.expires_on,
+    daysRemaining: record.permitStatus.daysRemaining,
+    lastUpdated: record.permit_updated_at || record.updated_at,
+  });
+});
+app.get("/api/v1/permits", requireDatabase, requirePermitApi("permit:read"), async (req, res) => {
+  res.json({ records: await dbListPermits(req.query) });
+});
+app.get("/api/v1/permits/:registration", requireDatabase, requirePermitApi("permit:read"), async (req, res) => {
+  const record = await dbGetPermit(req.params.registration);
+  if (!record) return res.status(404).json({ error: "Vehicle not found." });
+  res.json(record);
+});
+app.put("/api/v1/permits/:registration", requireDatabase, requirePermitApi("permit:write"), async (req, res) => {
+  try { res.json({ ok: true, record: await upsertPermitRecord({ ...req.body, registration: req.params.registration }, { actor: `api:${req.apiKey.name}`, ip: req.ip, userAgent: req.get("user-agent"), requestId: req.requestId }) }); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+
 app.get("/dashboard", requireAdmin, (_req, res) => res.sendFile(path.join(__dirname, "public", "permit-manager.html")));
 app.get("/permit-manager", requireAdmin, (_req, res) => res.sendFile(path.join(__dirname, "public", "permit-manager.html")));
 app.get("/permit-manager.html", requireAdmin, (_req, res) => res.sendFile(path.join(__dirname, "public", "permit-manager.html")));
@@ -1821,7 +1966,66 @@ process.on("SIGINT", () => {
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server listening on http://0.0.0.0:${PORT}`);
-  console.log(`PING timeout: ${PING_TIMEOUT_MINUTES} minute(s).`);
-});
+
+let lastPermitAlertDate = null;
+function londonParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: PERMIT_ALERT_TIMEZONE, year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",hourCycle:"h23" }).formatToParts(date);
+  return Object.fromEntries(parts.map(p => [p.type,p.value]));
+}
+async function runPermitAlerts(force = false) {
+  if (!databaseReady) return { ok:false, skipped:true, reason:"database unavailable" };
+  if (!PERMIT_ALERT_EMAIL) return { ok:false, skipped:true, reason:"PERMIT_ALERT_EMAIL not configured" };
+  const transporter = evidenceTransporter();
+  if (!transporter) return { ok:false, skipped:true, reason:"SMTP not configured" };
+  const parts = londonParts();
+  const today = `${parts.year}-${parts.month}-${parts.day}`;
+  if (!force && (Number(parts.hour) !== PERMIT_ALERT_HOUR || lastPermitAlertDate === today)) return { ok:true, skipped:true };
+  const due = await duePermitAlerts(PERMIT_ALERT_DAYS, PERMIT_ALERT_EMAIL);
+  let sent=0, failed=0;
+  for (const item of due) {
+    const days = Number(item.days_remaining);
+    const label = days===0 ? "expires today" : `expires in ${days} day${days===1?'':'s'}`;
+    try {
+      await transporter.sendMail({
+        from: SMTP_FROM,
+        to: PERMIT_ALERT_EMAIL,
+        subject: `Taxi permit ${label} – ${item.display_registration || item.registration}`,
+        text: `Registration: ${item.display_registration || item.registration}\nPlate number: ${item.plate_number || 'Not recorded'}\nOperator: ${item.operator_name || 'Not recorded'}\nCallsign: ${item.callsign || 'Not recorded'}\nPermit expiry: ${String(item.expires_on).slice(0,10)}\nDays remaining: ${days}\n\nOpen permit database: ${String(process.env.PUBLIC_URL || '').replace(/\/$/,'')}/database`,
+      });
+      await recordPermitNotification({ permitId:item.permit_id, alertDays:days, recipient:PERMIT_ALERT_EMAIL, success:true });
+      await writeSystemLog({ category:"permit-alert", level:"info", message:`Permit alert sent for ${item.registration} (${days} days)` });
+      sent++;
+    } catch (error) {
+      await recordPermitNotification({ permitId:item.permit_id, alertDays:days, recipient:PERMIT_ALERT_EMAIL, success:false, errorMessage:error.message });
+      await writeSystemLog({ category:"permit-alert", level:"error", message:`Permit alert failed for ${item.registration}: ${error.message}` });
+      failed++;
+    }
+  }
+  lastPermitAlertDate = today;
+  return { ok:true, checked:due.length, sent, failed, date:today };
+}
+setInterval(() => runPermitAlerts(false).catch(error => console.error("Permit alert scheduler failed:", error.message)), 15 * 60 * 1000).unref();
+
+async function bootstrap() {
+  try {
+    const result = await initDatabase();
+    databaseReady = result.enabled;
+    if (databaseReady) {
+      const seed = readPlymouthRegister();
+      const migrated = await seedFromJson(seed.records);
+      console.log(`PostgreSQL permit database connected${migrated.imported ? `; imported ${migrated.imported} seed records` : ""}.`);
+    } else {
+      console.warn("DATABASE_URL is not configured; JSON permit storage remains active.");
+      if (DATABASE_REQUIRED) throw new Error("DATABASE_REQUIRED=true but DATABASE_URL is missing.");
+    }
+  } catch (error) {
+    databaseError = error.message;
+    console.error("Database startup failed:", error.message);
+    if (DATABASE_REQUIRED) process.exit(1);
+  }
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server listening on http://0.0.0.0:${PORT}`);
+    console.log(`PING timeout: ${PING_TIMEOUT_MINUTES} minute(s).`);
+  });
+}
+bootstrap();
